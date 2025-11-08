@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# fcli - Fedora Linux CLI wrapper tool
+# sys-sync - A multi-distro declarative CLI wrapper tool
 
 set -euo pipefail
 
 # Configuration paths
-FEDORA_CONFIG_DIR="${FEDORA_CONFIG_DIR:-${HOME}/.config/fedora-config}"
-CONFIG_FILE="${FEDORA_CONFIG_DIR}/config.yaml"
-PACKAGES_DIR="${FEDORA_CONFIG_DIR}/packages"
-STATE_DIR="${FEDORA_CONFIG_DIR}/state"
+SYS_CONFIG_DIR="${SYS_CONFIG_DIR:-${HOME}/.config/sys-config}"
+CONFIG_FILE="${SYS_CONFIG_DIR}/config.yaml"
+PACKAGES_DIR="${SYS_CONFIG_DIR}/packages"
+STATE_DIR="${SYS_CONFIG_DIR}/state"
 STATE_FILE="${STATE_DIR}/installed.yaml"
 
 # Colors
@@ -17,49 +17,119 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# ============================================================================
+# DISTRO-SPECIFIC CONFIGURATION
+# ============================================================================
+
+DISTRO_ID=""
+CMD_INSTALL=""
+CMD_REMOVE=""
+CMD_UPDATE=""
+CMD_SEARCH=""
+CMD_LIST_INSTALLED=""
+DEP_YQ_INSTALL=""
+DEP_TS_INSTALL=""
+
+# Detect the distro
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    DISTRO_ID=$ID
+    # Handle ID_LIKE for derivatives (e.g., Pop!_OS, Linux Mint)
+    if [ -z "$DISTRO_ID" ] && [ -n "$ID_LIKE" ]; then
+        DISTRO_ID=$ID_LIKE
+    fi
+else
+    echo -e "${RED}Error: Cannot detect distribution. /etc/os-release not found.${NC}" >&2
+    exit 1
+fi
+
+case $DISTRO_ID in
+    fedora)
+        echo -e "${BLUE}Fedora system detected${NC}"
+        CMD_INSTALL="sudo dnf install -y"
+        CMD_REMOVE="sudo dnf remove -y"
+        CMD_UPDATE="sudo dnf update -y"
+        CMD_SEARCH="dnf search"
+        CMD_LIST_INSTALLED="rpm -qa --qf '%{NAME}\n'"
+        DEP_YQ_INSTALL="sudo dnf install yq"
+        DEP_TS_INSTALL="sudo dnf install timeshift"
+        ;;
+    arch)
+        echo -e "${BLUE}Arch Linux system detected${NC}"
+        # Assumes paru (or another AUR helper) for update/search
+        # Uses pacman for official sync operations
+        CMD_INSTALL="sudo pacman -S --noconfirm --needed"
+        CMD_REMOVE="sudo pacman -Rs --noconfirm"
+        CMD_UPDATE="paru -Syu --noconfirm"
+        CMD_SEARCH="paru"
+        CMD_LIST_INSTALLED="pacman -Qq"
+        DEP_YQ_INSTALL="sudo pacman -S go-yq"
+        DEP_TS_INSTALL="sudo pacman -S timeshift"
+        ;;
+    debian|ubuntu|pop)
+        echo -e "${BLUE}Debian-based system detected ($ID)${NC}"
+        # Set non-interactive to avoid prompts during install/remove
+        export DEBIAN_FRONTEND=noninteractive
+        CMD_INSTALL="sudo apt install -y"
+        CMD_REMOVE="sudo apt remove -y"
+        CMD_UPDATE="sudo apt update && sudo apt upgrade -y"
+        CMD_SEARCH="apt search"
+        CMD_LIST_INSTALLED="dpkg-query -W -f='${binary:Package}\n'"
+        DEP_YQ_INSTALL="sudo apt install yq"
+        DEP_TS_INSTALL="sudo apt install timeshift"
+        ;;
+    *)
+        echo -e "${RED}Error: Unsupported distribution: $ID${NC}" >&2
+        echo "This script currently supports: fedora, arch, debian, ubuntu, pop" >&2
+        exit 1
+        ;;
+esac
+
+# ============================================================================
+
 # Helper function
 print_help() {
   cat << EOF
-fcli - Fedora Linux CLI wrapper tool
+sys-sync - A multi-distro declarative CLI wrapper tool
 
 Setup:
-  fcli init                  - Initialize fedora-config directory structure
+  sys-sync init                  - Initialize sys-config directory structure
 
 Package Management:
-  fcli update                - Update system with dnf (sudo dnf update -y)
-  fcli <package-name>        - Search for package with dnf
-  fcli install <package>     - Install package with dnf (sudo dnf install -y)
-  fcli remove <package>      - Remove package with dnf (sudo dnf remove -y)
+  sys-sync update                - Update system (uses dnf, paru, or apt)
+  sys-sync <package-name>        - Search for package
+  sys-sync install <package>     - Install package natively
+  sys-sync remove <package>      - Remove package natively
 
 Declarative Package Management:
-  fcli sync                  - Install packages to match configuration
-  fcli sync -d, --dry-run    - Preview changes without applying
-  fcli sync --prune          - Remove packages not in configuration
-  fcli sync --force          - Skip confirmation prompts
-  fcli sync --no-backup      - Skip automatic Timeshift backup
-  fcli status                - Show current configuration and sync status
+  sys-sync sync                  - Install packages to match configuration
+  sys-sync sync -d, --dry-run    - Preview changes without applying
+  sys-sync sync --prune          - Remove packages not in configuration
+  sys-sync sync --force          - Skip confirmation prompts
+  sys-sync sync --no-backup      - Skip automatic Timeshift backup
+  sys-sync status                - Show current configuration and sync status
 
-  fcli module list           - Show all available modules and their status
-  fcli module enable <name>    - Enable a module
-  fcli module disable <name>   - Disable a module
+  sys-sync module list           - Show all available modules and their status
+  sys-sync module enable <name>    - Enable a module
+  sys-sync module disable <name>   - Disable a module
 
 Timeshift Commands:
-  (Requires: sudo dnf install timeshift)
-  fcli backup                - Create snapshot (timeshift --create)
+  (Requires Timeshift: ${DEP_TS_INSTALL})
+  sys-sync backup                - Create snapshot (timeshift --create)
 
 Repository Management:
-  fcli repo init             - Set up git for fedora-config (first computer)
-  fcli repo clone            - Clone existing fedora-config (new computer)
-  fcli repo push             - Commit and push changes
-  fcli repo pull             - Pull updates from other machines
-  fcli repo status           - Show git status
-  fcli backup list           - List snapshots (timeshift --list)
-  fcli restore               - Restore snapshot interactively (timeshift --restore)
-  fcli restore <snapshot>    - Restore specific snapshot (timeshift --restore --snapshot)
-  fcli -d <snapshot>         - Delete snapshot (timeshift --delete --snapshot)
-  fcli -c backup             - Check snapshot integrity (timeshift --check)
+  sys-sync repo init             - Set up git for sys-config (first computer)
+  sys-sync repo clone            - Clone existing sys-config (new computer)
+  sys-sync repo push             - Commit and push changes
+  sys-sync repo pull             - Pull updates from other machines
+  sys-sync repo status           - Show git status
+  sys-sync backup list           - List snapshots (timeshift --list)
+  sys-sync restore               - Restore snapshot interactively (timeshift --restore)
+  sys-sync restore <snapshot>    - Restore specific snapshot (timeshift --restore --snapshot)
+  sys-sync -d <snapshot>         - Delete snapshot (timeshift --delete --snapshot)
+  sys-sync -c backup             - Check snapshot integrity (timeshift --check)
 
-  help                       - Show this help message
+  help                           - Show this help message
 EOF
 }
 
@@ -67,7 +137,7 @@ EOF
 check_yq() {
   if ! command -v yq &> /dev/null; then
     echo -e "${RED}Error: yq is required but not installed${NC}" >&2
-    echo "Install with: sudo dnf install yq" >&2
+    echo "Install with: ${DEP_YQ_INSTALL}" >&2
     exit 1
   fi
 }
@@ -76,7 +146,7 @@ check_yq() {
 check_timeshift() {
   if ! command -v timeshift &> /dev/null; then
     echo -e "${RED}Error: timeshift is required but not installed${NC}" >&2
-    echo "Install with: sudo dnf install timeshift" >&2
+    echo "Install with: ${DEP_TS_INSTALL}" >&2
     exit 1
   fi
 }
@@ -85,6 +155,7 @@ check_timeshift() {
 load_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Configuration file not found: $CONFIG_FILE${NC}" >&2
+    echo "Run 'sys-sync init' to create one." >&2
     exit 1
   fi
   cat "$CONFIG_FILE"
@@ -109,21 +180,21 @@ get_declared_packages() {
   # 1. Load base packages
   if [ -f "${PACKAGES_DIR}/base.yaml" ]; then
     while IFS= read -r pkg; do
-      all_packages+=("$pkg")
-    done < <(yq '.packages[]' "${PACKAGES_DIR}/base.yaml")
+      [ -n "$pkg" ] && all_packages+=("$pkg")
+    done < <(yq '.packages[]?' "${PACKAGES_DIR}/base.yaml" 2>/dev/null)
   fi
 
   # 2. Load host-specific packages
   local host_file="${PACKAGES_DIR}/hosts/${hostname}.yaml"
   if [ -f "$host_file" ]; then
     while IFS= read -r pkg; do
-      all_packages+=("$pkg")
-    done < <(yq '.packages[]' "$host_file")
+      [ -n "$pkg" ] && all_packages+=("$pkg")
+    done < <(yq '.packages[]?' "$host_file" 2>/dev/null)
 
     # Get exclusions
     while IFS= read -r pkg; do
-      excluded_packages+=("$pkg")
-    done < <(yq '.exclude[]?' "$host_file" 2>/dev/null || true)
+      [ -n "$pkg" ] && excluded_packages+=("$pkg")
+    done < <(yq '.exclude[]?' "$host_file" 2>/dev/null)
   fi
 
   # 3. Load enabled module packages
@@ -132,8 +203,8 @@ get_declared_packages() {
       local module_file="${PACKAGES_DIR}/modules/${module}.yaml"
       if [ -f "$module_file" ]; then
         while IFS= read -r pkg; do
-          all_packages+=("$pkg")
-        done < <(yq '.packages[]' "$module_file")
+          [ -n "$pkg" ] && all_packages+=("$pkg")
+        done < <(yq '.packages[]?' "$module_file" 2>/dev/null)
       fi
     done <<< "$enabled_modules"
   fi
@@ -141,7 +212,7 @@ get_declared_packages() {
   # 4. Load additional packages from config
   while IFS= read -r pkg; do
     [ -n "$pkg" ] && all_packages+=("$pkg")
-  done < <(echo "$config" | yq '.additional_packages[]?' 2>/dev/null || true)
+  done < <(echo "$config" | yq '.additional_packages[]?' 2>/dev/null)
 
   # Remove duplicates and excluded packages
   local unique_packages
@@ -159,15 +230,15 @@ get_declared_packages() {
 
 # Get currently installed packages
 get_installed_packages() {
-  # rpm -qa --qf '%{NAME}\n' lists all installed package names
-  rpm -qa --qf '%{NAME}\n'
+  # Use eval to correctly handle commands with quotes
+  eval "$CMD_LIST_INSTALLED"
 }
 
 # Create Timeshift backup
 create_backup() {
   check_timeshift
   echo -e "${BLUE}Creating Timeshift snapshot before sync...${NC}"
-  if ! sudo timeshift --create --comments "fcli sync autobackup" --scripted > /dev/null 2>&1; then
+  if ! sudo timeshift --create --comments "sys-sync autobackup" --scripted > /dev/null 2>&1; then
     echo -e "${YELLOW}Warning: Failed to create Timeshift backup${NC}"
     echo -e "${YELLOW}Continuing anyway...${NC}"
   else
@@ -225,6 +296,7 @@ cmd_sync() {
   # Find packages to install
   local to_install=()
   while IFS= read -r pkg; do
+    [ -z "$pkg" ] && continue
     if ! echo "$installed_packages" | grep -q "^${pkg}$"; then
       to_install+=("$pkg")
     fi
@@ -236,9 +308,10 @@ cmd_sync() {
     # Load state file to see what we previously installed
     if [ -f "$STATE_FILE" ]; then
       local managed_packages
-      managed_packages=$(yq '.packages[]' "$STATE_FILE" 2>/dev/null || true)
+      managed_packages=$(yq '.packages[]?' "$STATE_FILE" 2>/dev/null || true)
 
       while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
         if ! echo "$declared_packages" | grep -q "^${pkg}$"; then
           # Package was managed but is no longer declared
           if echo "$installed_packages" | grep -q "^${pkg}$"; then
@@ -319,7 +392,8 @@ cmd_sync() {
   if [ ${#to_install[@]} -gt 0 ]; then
     echo ""
     echo -e "${BLUE}Installing packages...${NC}"
-    if ! sudo dnf install -y "${to_install[@]}"; then
+    # Use eval to handle package groups (like @core) correctly
+    if ! eval "$CMD_INSTALL" "${to_install[@]}"; then
       echo -e "${RED}Error: Failed to install packages${NC}" >&2
       exit 1
     fi
@@ -330,7 +404,7 @@ cmd_sync() {
   if [ ${#to_remove[@]} -gt 0 ]; then
     echo ""
     echo -e "${BLUE}Removing packages...${NC}"
-    if ! sudo dnf remove -y "${to_remove[@]}"; then
+    if ! $CMD_REMOVE "${to_remove[@]}"; then
       echo -e "${RED}Error: Failed to remove packages${NC}" >&2
       exit 1
     fi
@@ -346,7 +420,7 @@ cmd_sync() {
         post_hook=$(yq '.post_install_hook?' "$module_file" 2>/dev/null || echo "")
 
         if [ -n "$post_hook" ] && [ "$post_hook" != "null" ]; then
-          local hook_script="${FEDORA_CONFIG_DIR}/${post_hook}"
+          local hook_script="${SYS_CONFIG_DIR}/${post_hook}"
           if [ -f "$hook_script" ]; then
             echo ""
             echo -e "${BLUE}Running post-install hook for '${module}'...${NC}"
@@ -388,13 +462,13 @@ cmd_module_list() {
       module_name=$(basename "$module_file" .yaml)
 
       local description
-      description=$(yq '.description' "$module_file")
+      description=$(yq '.description?' "$module_file" 2>/dev/null)
 
       local conflicts
       conflicts=$(yq '.conflicts[]?' "$module_file" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 
       local pkg_count
-      pkg_count=$(yq '.packages | length' "$module_file")
+      pkg_count=$(yq '.packages | length' "$module_file" 2>/dev/null)
 
       local status="disabled"
       if echo "$enabled_modules" | grep -q "^${module_name}$"; then
@@ -423,7 +497,7 @@ cmd_module_enable() {
 
   if [ ! -f "$module_file" ]; then
     echo -e "${RED}Error: Module '${module_name}' not found${NC}" >&2
-    echo "Run 'fcli module list' to see available modules" >&2
+    echo "Run 'sys-sync module list' to see available modules" >&2
     exit 1
   fi
 
@@ -464,7 +538,7 @@ if echo "$config" | yq -e '.enabled_modules[] | select(. == "'${module_name}'")'
   yq -i ".enabled_modules += [\"${module_name}\"]" "$CONFIG_FILE"
 
   echo -e "${GREEN}Module '${module_name}' enabled${NC}"
-  echo "Run 'fcli sync' to install packages"
+  echo "Run 'sys-sync sync' to install packages"
 }
 
 # Module disable command
@@ -486,7 +560,7 @@ if ! echo "$config" | yq -e '.enabled_modules[] | select(. == "'${module_name}'"
   yq -i ".enabled_modules = (.enabled_modules - [\"${module_name}\"])" "$CONFIG_FILE"
 
   echo -e "${GREEN}Module '${module_name}' disabled${NC}"
-  echo "Run 'fcli sync --prune' to remove packages"
+  echo "Run 'sys-sync sync --prune' to remove packages"
 }
 
 # Status command
@@ -507,6 +581,7 @@ cmd_status() {
 
   echo -e "${BLUE}=== Configuration Status ===${NC}"
   echo ""
+  echo -e "  Distro: ${GREEN}${DISTRO_ID}${NC}"
   echo -e "  Hostname: ${GREEN}${hostname}${NC}"
   echo -e "  Auto-prune: ${auto_prune}"
   echo ""
@@ -557,6 +632,7 @@ cmd_status() {
 
   local to_install=0
   while IFS= read -r pkg; do
+    [ -z "$pkg" ] && continue
     if ! echo "$installed_packages" | grep -q "^${pkg}$"; then
       ((to_install++))
     fi
@@ -568,21 +644,21 @@ cmd_status() {
 
   if [ "$to_install" -gt 0 ]; then
     echo ""
-    echo -e "${YELLOW}System is out of sync. Run 'fcli sync' to install packages.${NC}"
+    echo -e "${YELLOW}System is out of sync. Run 'sys-sync sync' to install packages.${NC}"
   else
     echo ""
     echo -e "${GREEN}System is in sync!${NC}"
   fi
 }
 
-# Initialize fedora-config directory structure
+# Initialize sys-config directory structure
 cmd_init() {
-  echo -e "${BLUE}Initializing fedora-config directory structure...${NC}"
+  echo -e "${BLUE}Initializing sys-config directory structure...${NC}"
   echo ""
 
-  # Check if fedora-config already exists
-  if [ -d "$FEDORA_CONFIG_DIR" ]; then
-    echo -e "${YELLOW}Warning: $FEDORA_CONFIG_DIR already exists${NC}"
+  # Check if sys-config already exists
+  if [ -d "$SYS_CONFIG_DIR" ]; then
+    echo -e "${YELLOW}Warning: $SYS_CONFIG_DIR already exists${NC}"
     read -p "Do you want to reinitialize? This will backup existing files. [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -591,18 +667,17 @@ cmd_init() {
     fi
 
     # Backup existing directory
-    local backup_dir="${FEDORA_CONFIG_DIR}.backup.$(date +%s)"
+    local backup_dir="${SYS_CONFIG_DIR}.backup.$(date +%s)"
     echo -e "${BLUE}Backing up existing directory to: ${backup_dir}${NC}"
-    mv "$FEDORA_CONFIG_DIR" "$backup_dir"
+    mv "$SYS_CONFIG_DIR" "$backup_dir"
   fi
 
   # Create directory structure
-  mkdir -p "$FEDORA_CONFIG_DIR"
+  mkdir -p "$SYS_CONFIG_DIR"
   mkdir -p "$PACKAGES_DIR/hosts"
   mkdir -p "$PACKAGES_DIR/modules"
   mkdir -p "$STATE_DIR"
-  mkdir -p "$FEDORA_CONFIG_DIR/scripts"
-  mkdir -p "$FEDORA_CONFIG_DIR/udev-rules"
+  mkdir -p "$SYS_CONFIG_DIR/scripts"
 
   # Get hostname
   local hostname
@@ -610,14 +685,14 @@ cmd_init() {
 
   # Create config.yaml
   cat > "$CONFIG_FILE" << EOF
-# Main configuration for fcli declarative package management
+# Main configuration for sys-sync declarative package management
 # Edit this file to customize your system configuration
 
 # Hostname of this machine
 host: $hostname
 
 # List of enabled modules
-# Enable modules with: fcli module enable <module-name>
+# Enable modules with: sys-sync module enable <module-name>
 enabled_modules: []
 
 # Additional packages not in any module
@@ -629,25 +704,52 @@ EOF
 
   echo -e "${GREEN}✓${NC} Created config.yaml with hostname: $hostname"
 
-  # Create base.yaml
-  cat > "$PACKAGES_DIR/base.yaml" << 'EOF'
-# Base packages installed on all machines
-# These packages form the foundation of your system
-
-description: Base packages for all machines
-
+  # Create base.yaml (distro-specific)
+  case $DISTRO_ID in
+    fedora)
+      cat > "$PACKAGES_DIR/base.yaml" << 'EOF'
+# Base packages for Fedora
+description: Base packages for all Fedora machines
 packages:
-  # @core is a dnf group that includes the base system
   - "@core"
   - kernel
   - linux-firmware
   - NetworkManager
   - vim-enhanced
   - git
-  - yq  # YAML processor for fcli
+  - yq
 EOF
+      ;;
+    arch)
+      cat > "$PACKAGES_DIR/base.yaml" << 'EOF'
+# Base packages for Arch
+description: Base packages for all Arch machines
+packages:
+  - base
+  - linux
+  - linux-firmware
+  - networkmanager
+  - vim
+  - git
+  - go-yq
+EOF
+      ;;
+    debian|ubuntu|pop)
+      cat > "$PACKAGES_DIR/base.yaml" << 'EOF'
+# Base packages for Debian/Ubuntu
+description: Base packages for all Debian-based machines
+packages:
+  - build-essential
+  - linux-image-generic
+  - network-manager
+  - vim
+  - git
+  - yq
+EOF
+      ;;
+  esac
 
-  echo -e "${GREEN}✓${NC} Created packages/base.yaml"
+  echo -e "${GREEN}✓${NC} Created packages/base.yaml for $DISTRO_ID"
 
   # Create host-specific package file
   cat > "$PACKAGES_DIR/hosts/${hostname}.yaml" << EOF
@@ -686,17 +788,18 @@ packages: []
 # Modules that conflict with this one
 conflicts: []
 
-# Script to run after installing packages (optional)
+# Script to run after installing packages (optional, path relative to config dir)
+# e.g., scripts/my_hook.sh
 post_install_hook: ""
 EOF
 
   echo -e "${GREEN}✓${NC} Created example module"
 
   # Create README.md
-  cat > "$FEDORA_CONFIG_DIR/README.md" << EOF
-# fedora-config
+  cat > "$SYS_CONFIG_DIR/README.md" << EOF
+# sys-config
 
-Declarative package management configuration for Fedora Linux.
+Declarative package management configuration for Linux.
 
 ## Structure
 
@@ -705,7 +808,6 @@ Declarative package management configuration for Fedora Linux.
 - \`packages/hosts/\` - Host-specific package configurations
 - \`packages/modules/\` - Optional package modules
 - \`scripts/\` - Post-install hook scripts
-- \`udev-rules/\` - Custom udev rules
 - \`state/\` - Auto-generated state files (git-ignored)
 
 ## Usage
@@ -718,13 +820,13 @@ Edit \`packages/hosts/${hostname}.yaml\` to add packages specific to this machin
 
 ### Create and enable modules
 1. Create a new YAML file in \`packages/modules/\`
-2. Enable it with: \`fcli module enable <module-name>\`
-3. Sync packages: \`fcli sync\`
+2. Enable it with: \`sys-sync module enable <module-name>\`
+3. Sync packages: \`sys-sync sync\`
 
 ### Sync packages
 \`\`\`bash
-fcli sync          # Preview and install missing packages
-fcli sync --prune  # Also remove packages not in configuration
+sys-sync sync          # Preview and install missing packages
+sys-sync sync --prune  # Also remove packages not in configuration
 \`\`\`
 
 ## Git Integration
@@ -732,10 +834,10 @@ fcli sync --prune  # Also remove packages not in configuration
 Initialize a git repository to track your configuration:
 
 \`\`\`bash
-cd $FEDORA_CONFIG_DIR
+cd $SYS_CONFIG_DIR
 git init
 git add .
-git commit -m "Initial fedora-config setup"
+git commit -m "Initial sys-config setup"
 \`\`\`
 
 The \`state/installed.yaml\` file is auto-generated and git-ignored.
@@ -750,24 +852,22 @@ EOF
   echo "  1. Edit $PACKAGES_DIR/base.yaml to add your base packages"
   echo "  2. Edit $PACKAGES_DIR/hosts/${hostname}.yaml for host-specific packages"
   echo "  3. Create modules in $PACKAGES_DIR/modules/"
-  echo "  4. Run 'fcli repo init' to version control your config (recommended)"
-  echo "  5. Run 'fcli sync' to install packages"
-  echo "  git commit -m 'Initial fedora-config setup'"
+  echo "  4. Run 'sys-sync repo init' to version control your config (recommended)"
+  echo "  5. Run 'sys-sync sync' to install packages"
 }
 
 # ============================================================================
 # Git Repository Management Functions
+# (These are distro-agnostic and need no changes, only path renaming)
 # ============================================================================
 
-# Check if current directory is a git repository
 check_git_repo() {
-  if [ ! -d "$FEDORA_CONFIG_DIR/.git" ]; then
+  if [ ! -d "$SYS_CONFIG_DIR/.git" ]; then
     return 1
   fi
   return 0
 }
 
-# Validate git URL format
 validate_git_url() {
   local url="$1"
   if [[ "$url" =~ ^(https://|git@).+\.git$ ]] || [[ "$url" =~ ^(https://|git@).+$ ]]; then
@@ -776,7 +876,6 @@ validate_git_url() {
   return 1
 }
 
-# Handle common git errors
 handle_git_error() {
   local exit_code=$1
   local operation=$2
@@ -787,19 +886,12 @@ handle_git_error() {
     case $operation in
       "push"|"clone")
         echo -e "${YELLOW}Authentication may have failed.${NC}"
-        echo ""
-        echo "For HTTPS URLs:"
-        echo "  • You may need a Personal Access Token instead of password"
-        echo "  • GitHub: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token"
-        echo "  • GitLab: https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html"
-        echo ""
-        echo "For SSH URLs:"
-        echo "  • Ensure your SSH key is added to your account"
-        echo "  • Test with: ssh -T git@github.com (or git@gitlab.com)"
+        echo "For HTTPS URLs: You may need a Personal Access Token."
+        echo "For SSH URLs: Ensure your SSH key is added to your account."
         ;;
       "pull")
         echo -e "${YELLOW}There may be merge conflicts.${NC}"
-        echo "  • Run: cd $FEDORA_CONFIG_DIR && git status"
+        echo "  • Run: cd $SYS_CONFIG_DIR && git status"
         echo "  • Resolve conflicts manually, then: git add . && git commit"
         ;;
     esac
@@ -808,18 +900,11 @@ handle_git_error() {
   return 0
 }
 
-# ============================================================================
-# Repository Commands
-# ============================================================================
-
-# Initialize git repository
 cmd_repo_init() {
-  cd "$FEDORA_CONFIG_DIR" || exit 1
+  cd "$SYS_CONFIG_DIR" || exit 1
   
-  # Check if already a git repo
   if check_git_repo; then
     echo -e "${YELLOW}This directory is already a git repository.${NC}"
-    echo "Remote: $(git remote get-url origin 2>/dev/null || echo 'No remote configured')"
     read -p "Reinitialize? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -828,68 +913,19 @@ cmd_repo_init() {
     fi
   fi
   
-  echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║  Git Repository Setup                  ║${NC}"
-  echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
-  echo ""
-  
-  # Ask if user wants to set up git
-  read -p "Version control your fedora-config with git? [Y/n] " -n 1 -r
+  echo -e "${BLUE}Setting up Git Repository...${NC}"
+  read -p "Version control your sys-config with git? [Y/n] " -n 1 -r
   echo
   if [[ $REPLY =~ ^[Nn]$ ]]; then
     echo -e "${YELLOW}Skipped git setup${NC}"
     exit 0
   fi
   
-  # Ask for platform
-  echo ""
-  echo "Which platform are you using?"
-  echo "  1) GitHub"
-  echo "  2) GitLab"
-  echo "  3) Other"
-  read -p "Choice [1-3]: " platform_choice
+  echo "On GitHub/GitLab, create a new private repository (e.g., 'sys-config')."
+  echo "Do NOT initialize it with a README."
+  read -p "Press Enter when done..."
   
-  case $platform_choice in
-    1) platform="GitHub" ;;
-    2) platform="GitLab" ;;
-    3) platform="Other" ;;
-    *) platform="GitHub" ;;
-  esac
-  
-  # Ask if repo is created
-  echo ""
-  read -p "Have you already created a repository on $platform? [y/N] " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo ""
-    echo -e "${BLUE}Please create a repository:${NC}"
-    case $platform in
-      "GitHub")
-        echo "  → https://github.com/new"
-        echo "  • Name it something like 'fedora-config' or 'my-fedora-config'"
-        echo "  • Make it Private (recommended) or Public"
-        echo "  • Don't initialize with README"
-        ;;
-      "GitLab")
-        echo "  → https://gitlab.com/projects/new"
-        echo "  • Name it something like 'fedora-config' or 'my-fedora-config'"
-        echo "  • Set visibility as desired"
-        echo "  • Don't initialize with README"
-        ;;
-      *)
-        echo "  • Create an empty repository on your git platform"
-        ;;
-    esac
-    echo ""
-    read -p "Press Enter when done..."
-  fi
-  
-  # Get repository URL
-  echo ""
-  echo -e "${BLUE}Enter your repository URL${NC}"
-  echo "Examples:"
-  echo "  HTTPS: https://github.com/username/fedora-config.git"
-  echo "  SSH:   git@github.com:username/fedora-config.git"
+  echo -e "${BLUE}Enter your repository URL${NC} (e.g., git@github.com:user/sys-config.git)"
   read -p "URL: " repo_url
   
   if ! validate_git_url "$repo_url"; then
@@ -897,74 +933,39 @@ cmd_repo_init() {
     exit 1
   fi
   
-  # Get git user info
-  echo ""
-  read -p "Git username: " git_user
-  read -p "Git email: " git_email
-  
-  echo ""
   echo -e "${BLUE}Setting up repository...${NC}"
-  echo ""
   
-  # Initialize git if not already
   if [ ! -d ".git" ]; then
-    echo -e "${BLUE}→${NC} Initializing git repository..."
     git init || exit 1
   fi
   
-  # Add config.yaml to .gitignore
   echo -e "${BLUE}→${NC} Adding config.yaml to .gitignore..."
   if ! grep -q "^config.yaml$" .gitignore 2>/dev/null; then
     echo "config.yaml" >> .gitignore
   fi
   
-  # Configure git user
-  echo -e "${BLUE}→${NC} Configuring git user..."
-  git config user.name "$git_user"
-  git config user.email "$git_email"
-  
-  # Add files
-  echo -e "${BLUE}→${NC} Staging files..."
   git add .
+  git commit -m "Initial sys-config setup from $(hostname)" || true
   
-  # Create initial commit
-  echo -e "${BLUE}→${NC} Creating initial commit..."
-  git commit -m "Initial fedora-config setup from $(hostname)" || true
-  
-  # Add remote
-  echo -e "${BLUE}→${NC} Adding remote origin..."
   if git remote get-url origin > /dev/null 2>&1; then
     git remote set-url origin "$repo_url"
   else
     git remote add origin "$repo_url"
   fi
   
-  # Push to remote
-  echo -e "${BLUE}→${NC} Pushing to remote..."
+  echo -e "${BLUE}→${NC} Pushing to remote...${NC}"
   if git push -u origin main 2>&1; then
-    echo ""
     echo -e "${GREEN}✓ Repository set up successfully!${NC}"
-    echo ""
-    echo "Your fedora-config is now version controlled at:"
-    echo "  $repo_url"
   else
     handle_git_error $? "push"
-    echo ""
-    echo -e "${YELLOW}Repository configured locally, but push failed.${NC}"
-    echo "Fix authentication, then run: cd $FEDORA_CONFIG_DIR && git push -u origin main"
   fi
 }
 
-# Clone existing repository
 cmd_repo_clone() {
-  echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║  Clone fedora-config Repository        ║${NC}"
-  echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
-  echo ""
+  echo -e "${BLUE}Cloning sys-config Repository...${NC}"
   
-  # Check if fedora-config exists
-  if [ -d "$FEDORA_CONFIG_DIR" ]; then
-    echo -e "${YELLOW}fedora-config directory already exists${NC}"
+  if [ -d "$SYS_CONFIG_DIR" ]; then
+    echo -e "${YELLOW}sys-config directory already exists${NC}"
     read -p "Backup and replace? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -973,11 +974,7 @@ cmd_repo_clone() {
     fi
   fi
   
-  # Get repository URL
-  echo "Enter your fedora-config repository URL:"
-  echo "Examples:"
-  echo "  HTTPS: https://github.com/username/fedora-config.git"
-  echo "  SSH:   git@github.com:username/fedora-config.git"
+  echo "Enter your sys-config repository URL:"
   read -p "URL: " repo_url
   
   if ! validate_git_url "$repo_url"; then
@@ -985,198 +982,113 @@ cmd_repo_clone() {
     exit 1
   fi
   
-  echo ""
-  echo -e "${BLUE}Cloning repository...${NC}"
-  echo ""
-  
-  # Backup existing if present
-  if [ -d "$FEDORA_CONFIG_DIR" ]; then
-    backup_dir="${FEDORA_CONFIG_DIR}.backup.$(date +%s)"
-    echo -e "${BLUE}→${NC} Backing up existing fedora-config to:"
-    echo "  $backup_dir"
-    mv "$FEDORA_CONFIG_DIR" "$backup_dir"
+  if [ -d "$SYS_CONFIG_DIR" ]; then
+    backup_dir="${SYS_CONFIG_DIR}.backup.$(date +%s)"
+    echo -e "${BLUE}→${NC} Backing up existing sys-config to: $backup_dir${NC}"
+    mv "$SYS_CONFIG_DIR" "$backup_dir"
   fi
   
-  # Clone repository
-  echo -e "${BLUE}→${NC} Cloning from $repo_url..."
-  if ! git clone "$repo_url" "$FEDORA_CONFIG_DIR"; then
+  echo -e "${BLUE}→${NC} Cloning from $repo_url...${NC}"
+  if ! git clone "$repo_url" "$SYS_CONFIG_DIR"; then
     handle_git_error $? "clone"
-    # Restore backup if clone failed
     if [ -d "$backup_dir" ]; then
-      mv "$backup_dir" "$FEDORA_CONFIG_DIR"
+      mv "$backup_dir" "$SYS_CONFIG_DIR"
     fi
     exit 1
   fi
   
-  cd "$FEDORA_CONFIG_DIR" || exit 1
+  cd "$SYS_CONFIG_DIR" || exit 1
   
-  # Auto-detect hostname
   local current_hostname
   current_hostname=$(hostname)
   
-  echo ""
   echo -e "${BLUE}→${NC} Configuring for host: ${GREEN}$current_hostname${NC}"
-  
-  # Update config.yaml
   yq -i ".host = \"$current_hostname\"" config.yaml
   
-  # Check if host file exists
   local host_file="packages/hosts/${current_hostname}.yaml"
   if [ -f "$host_file" ]; then
     echo -e "${YELLOW}Host configuration already exists: $host_file${NC}"
   else
-    # Ask for description
-    echo ""
-    read -p "Describe this machine (optional, e.g., 'Gaming Desktop'): " machine_desc
-    [ -z "$machine_desc" ] && machine_desc="$current_hostname"
-    
-    echo -e "${BLUE}→${NC} Creating host-specific configuration..."
+    echo -e "${BLUE}→${NC} Creating new host-specific configuration...${NC}"
     cat > "$host_file" << EOF
 # Host-specific packages for $current_hostname
-# $machine_desc
-
 description: Packages specific to $current_hostname
-
-# Packages to install only on this host
 packages: []
-
-# Packages to exclude from base or modules on this host
 exclude: []
 EOF
   fi
   
-  # Commit changes
-  echo -e "${BLUE}→${NC} Committing host configuration..."
-  git add .
-  git commit -m "Add $current_hostname host configuration" || true
-  
-  # Push changes
-  echo -e "${BLUE}→${NC} Pushing changes..."
-  if git push; then
-    echo ""
-    echo -e "${GREEN}✓ fedora-config cloned and configured successfully!${NC}"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Review: $host_file"
-    echo "  2. Run: fcli module list"
-    echo "  3. Run: fcli sync"
-  else
-    handle_git_error $? "push"
-    echo ""
-    echo -e "${YELLOW}Cloned successfully, but push failed.${NC}"
-    echo "Fix authentication, then run: fcli repo push"
-  fi
+  echo -e "${GREEN}✓ sys-config cloned and configured!${NC}"
+  echo "Run 'sys-sync sync' to apply your configuration."
 }
 
-# Push changes to remote
 cmd_repo_push() {
-  cd "$FEDORA_CONFIG_DIR" || exit 1
+  cd "$SYS_CONFIG_DIR" || exit 1
   
   if ! check_git_repo; then
     echo -e "${RED}Not a git repository${NC}"
-    echo "Run 'fcli repo init' first"
     exit 1
   fi
   
-  echo -e "${BLUE}Pushing fedora-config changes...${NC}"
-  echo ""
+  echo -e "${BLUE}Pushing sys-config changes...${NC}"
   
-  # Check for changes
   if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     echo -e "${BLUE}→${NC} Changes detected"
-    git status --short
-    echo ""
+  elif ! git diff --quiet 2>/dev/null; then
+    echo -e "${BLUE}→${NC} Unstaged changes detected"
   else
-    if ! git diff --quiet 2>/dev/null; then
-      echo -e "${BLUE}→${NC} Unstaged changes detected"
-    else
-      echo -e "${GREEN}No changes to commit${NC}"
-      exit 0
-    fi
+    echo -e "${GREEN}No changes to commit${NC}"
+    exit 0
   fi
   
-  # Get commit message
-  echo ""
-  echo "Commit message (or press Enter for default):"
-  read -p "> " commit_msg
+  read -p "Commit message (default: 'Update'): " commit_msg
+  [ -z "$commit_msg" ] && commit_msg="Update sys-config from $(hostname)"
   
-  if [ -z "$commit_msg" ]; then
-    commit_msg="Update fedora-config from $(hostname) - $(date '+%Y-%m-%d %H:%M')"
-  fi
-  
-  echo ""
-  echo -e "${BLUE}→${NC} Staging changes..."
+  echo -e "${BLUE}→${NC} Staging, committing, and pushing...${NC}"
   git add .
-  
-  echo -e "${BLUE}→${NC} Committing..."
   git commit -m "$commit_msg"
   
-  echo -e "${BLUE}→${NC} Pushing to remote..."
   if git push; then
-    echo ""
     echo -e "${GREEN}✓ Changes pushed successfully!${NC}"
   else
     handle_git_error $? "push"
   fi
 }
 
-# Pull changes from remote
 cmd_repo_pull() {
-  cd "$FEDORA_CONFIG_DIR" || exit 1
+  cd "$SYS_CONFIG_DIR" || exit 1
   
   if ! check_git_repo; then
     echo -e "${RED}Not a git repository${NC}"
-    echo "Run 'fcli repo init' or 'fcli repo clone' first"
     exit 1
   fi
   
   echo -e "${BLUE}Pulling updates from remote...${NC}"
-  echo ""
   
-  echo -e "${BLUE}→${NC} Fetching changes..."
   if git pull; then
-    echo ""
     echo -e "${GREEN}✓ Updates pulled successfully!${NC}"
-    echo ""
-    echo "Run 'fcli sync' to install any new packages"
+    echo "Run 'sys-sync sync' to apply any new package changes"
   else
     handle_git_error $? "pull"
   fi
 }
 
-# Show repository status
 cmd_repo_status() {
-  cd "$FEDORA_CONFIG_DIR" || exit 1
+  cd "$SYS_CONFIG_DIR" || exit 1
   
   if ! check_git_repo; then
     echo -e "${RED}Not a git repository${NC}"
-    echo "Run 'fcli repo init' or 'fcli repo clone' first"
     exit 1
   fi
   
   echo -e "${BLUE}Repository Status:${NC}"
-  echo ""
-  
-  # Show remote
-  local remote_url
-  remote_url=$(git remote get-url origin 2>/dev/null || echo "No remote configured")
-  echo "Remote: $remote_url"
-  
-  # Show current branch
-  local branch
-  branch=$(git branch --show-current 2>/dev/null || echo "unknown")
-  echo "Branch: $branch"
-  echo ""
-  
-  # Show git status
   git status
-  
-  echo ""
-  echo -e "${BLUE}Tip:${NC} Use 'fcli repo push' to save your changes"
 }
 
 
-# Main command handling
+# ============================================================================
+# MAIN COMMAND HANDLER
+# ============================================================================
 case "${1:-}" in
   help|--help|-h)
     print_help
@@ -1187,67 +1099,50 @@ case "${1:-}" in
     exit 0
     ;;
   update)
-    sudo dnf update -y
+    eval "$CMD_UPDATE"
     ;;
-
   install)
     if [ $# -lt 2 ]; then
       echo "Error: Please specify a package to install" >&2
-      echo "Usage: fcli install <package-name>" >&2
       exit 1
     fi
     shift
-    sudo dnf install -y "$@"
+    eval "$CMD_INSTALL" "$@"
     ;;
-
   remove)
     if [ $# -lt 2 ]; then
       echo "Error: Please specify a package to remove" >&2
-      echo "Usage: fcli remove <package-name>" >&2
       exit 1
     fi
     shift
-    sudo dnf remove -y "$@"
+    eval "$CMD_REMOVE" "$@"
     ;;
-
   sync)
     shift
     cmd_sync "$@"
     ;;
-
   module)
     case "${2:-}" in
       list)
         cmd_module_list
         ;;
       enable)
-        if [ $# -lt 3 ]; then
-          echo "Error: Please specify a module to enable" >&2
-          echo "Usage: fcli module enable <module-name>" >&2
-          exit 1
-        fi
+        [ $# -lt 3 ] && { echo "Error: No module name specified" >&2; exit 1; }
         cmd_module_enable "$3"
         ;;
       disable)
-        if [ $# -lt 3 ]; then
-          echo "Error: Please specify a module to disable" >&2
-          echo "Usage: fcli module disable <module-name>" >&2
-          exit 1
-        fi
+        [ $# -lt 3 ] && { echo "Error: No module name specified" >&2; exit 1; }
         cmd_module_disable "$3"
         ;;
       *)
         echo "Error: Unknown module command: ${2:-}" >&2
-        echo "Usage: fcli module {list|enable|disable}" >&2
         exit 1
         ;;
     esac
     ;;
-
   status)
     cmd_status
     ;;
-
   repo)
     case "${2:-}" in
       init)
@@ -1267,21 +1162,18 @@ case "${1:-}" in
         ;;
       *)
         echo "Error: Unknown repo command: ${2:-}" >&2
-        echo "Usage: fcli repo {init|clone|push|pull|status}" >&2
         exit 1
         ;;
     esac
     ;;
-
   backup)
     check_timeshift
     if [ "${2:-}" = "list" ]; then
       sudo timeshift --list
     else
-      sudo timeshift --create --comments "fcli backup (manual)"
+      sudo timeshift --create --comments "sys-sync backup (manual)"
     fi
     ;;
-
   restore)
     check_timeshift
     if [ $# -ge 2 ]; then
@@ -1290,36 +1182,30 @@ case "${1:-}" in
       sudo timeshift --restore
     fi
     ;;
-
   -d)
     check_timeshift
     if [ $# -lt 2 ]; then
       echo "Error: Please specify a snapshot to delete" >&2
-      echo "Usage: fcli -d <snapshot-name>" >&2
       exit 1
     fi
     sudo timeshift --delete --snapshot "$2"
     ;;
-
   -c)
     check_timeshift
     if [ "${2:-}" = "backup" ]; then
       sudo timeshift --check
     else
       echo "Error: Unknown option for -c flag" >&2
-      echo "Usage: fcli -c backup" >&2
       exit 1
     fi
     ;;
-
   "")
     echo "Error: No command provided" >&2
-    echo "Usage: fcli [command] [options]" >&2
+    print_help
     exit 1
     ;;
-
   *)
-    # Default: pass to dnf as search
-    dnf search "$@"
+    # Default: pass to search
+    eval "$CMD_SEARCH" "$@"
     ;;
 esac
