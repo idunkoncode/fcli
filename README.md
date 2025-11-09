@@ -235,30 +235,27 @@ Repository Structure
 
 Your repository will look like this:
 
-my-wcli-config/
-├── .gitignore              # config.yaml is auto-ignored
-├── packages/
-│   ├── base.yaml          # Shared across all machines
-│   ├── modules/           # Shared modules
-│   │   ├── gaming.yaml
-│   │   ├── development.yaml
-│   │   └── ...
-│   └── hosts/             # Machine-specific configs
-│       ├── desktop.yaml   # Your desktop config
-│       └── laptop.yaml    # Your laptop config  
-├── scripts/               # Shared scripts
-└── README.md
+    my-wcli-config/
+    ├── .gitignore              # config.yaml is auto-ignored
+    ├── packages/
+    │   ├── base.yaml          # Shared across all machines
+    │   ├── modules/           # Shared modules
+    │   │   ├── gaming.yaml
+    │   │   ├── development.yaml
+    │   │   └── ...
+    │   └── hosts/             # Machine-specific configs
+    │       ├── desktop.yaml   # Your desktop config
+    │       └── laptop.yaml    # Your laptop config  
+    ├── scripts/               # Shared scripts
+    └── README.md
 
 Each machine maintains its own config.yaml (git-ignored) with the correct hostname and enabled modules.
-
 Advanced Usage
 
 Environment Variables
 
     SYS_CONFIG_DIR - Override the default config location (~/.config/wcli-config)
-
     Bash
-
     SYS_CONFIG_DIR=/custom/path wcli sync
 
 Example Workflows
