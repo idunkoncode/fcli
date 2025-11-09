@@ -15,7 +15,7 @@ SYS_CONFIG_DIR = Path(os.environ.get("SYS_CONFIG_DIR", Path.home() / ".config" /
 CONFIG_FILE = SYS_CONFIG_DIR / "config.yaml"
 PACKAGES_DIR = SYS_CONFIG_DIR / "packages"
 STATE_DIR = SYS_CONFIG_DIR / "state"
-STATE_FILE = STATE_DIR / "installed.yaml"
+STATE_FILE = SYS_CONFIG_DIR / "installed.yaml"
 
 # --- Colors ---
 #
@@ -41,8 +41,6 @@ def get_provider():
                 elif line.startswith("ID_LIKE="):
                     id_like = line.strip().split('=')[1].lower().strip('"')
 
-        # --- FIX: More robust detection ---
-        # This logic now checks ID and ID_LIKE explicitly.
         distro_name = ""
         if "fedora" in distro_id:
             from providers.fedora import Provider
@@ -68,7 +66,6 @@ def get_provider():
         print(f"{BLUE}System detected: {distro_id} (using {distro_name} provider){NC}")
         return Provider()
 
-    # --- FIX: Better error message for missing 'providers' ---
     except ImportError as e:
         print(f"{RED}Error: A provider module could not be imported.{NC}")
         print(f"{YELLOW}This almost always means the 'providers' directory is missing from the install location (e.g., /usr/local/lib/wcli/).{NC}")
@@ -117,6 +114,7 @@ def get_declared_packages(config: dict) -> dict:
         "opensuse_obs": {},
         "gentoo_overlay": {},
         "void_src": set(),
+        "flatpaks": set(), # <-- NEW
     }
     excluded_packages = set()
     hostname = config.get('host', '')
@@ -130,7 +128,8 @@ def get_declared_packages(config: dict) -> dict:
                         return
                     
                     # Handle set-like lists
-                    for key in ["packages", "arch_aur", "void_src"]:
+                    # <-- NEW: Added "flatpaks" -->
+                    for key in ["packages", "arch_aur", "void_src", "flatpaks"]:
                         if key in data and data[key]:
                             package_lists[key].update(data[key])
                     
@@ -174,11 +173,9 @@ def run_cmd(cmd: list, cwd: Path = None, check: bool = True) -> subprocess.Compl
     """Helper to run a non-interactive command and capture output."""
     return subprocess.run(cmd, cwd=cwd, check=check, text=True, capture_output=True, errors='ignore')
 
-# <-- NEW: Command runner for interactive commands like 'list' or 'restore' -->
 def run_interactive_cmd(cmd: list, cwd: Path = None, check: bool = True) -> bool:
     """Helper to run an interactive command that streams output."""
     try:
-        # Runs the command and streams STDOUT/STDERR to the user's terminal
         subprocess.run(cmd, cwd=cwd, check=check)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -187,17 +184,14 @@ def run_interactive_cmd(cmd: list, cwd: Path = None, check: bool = True) -> bool
         print(f"\n{YELLOW}Command cancelled.{NC}")
         return False
 
-# <-- CHANGE: Renamed to be generic -->
 def create_auto_snapshot():
     """Creates a pre-sync snapshot using snapper or timeshift."""
     
     comment = "wcli-sync auto-snapshot"
     
-    # --- NEW: Snapper and Timeshift auto-detection ---
     if shutil.which("snapper"):
         print(f"{BLUE}Using snapper to create snapshot...{NC}")
         try:
-            # Snapper's 'create' command is designed for this
             run_cmd(["sudo", "snapper", "create", "--type", "pre", "--description", comment, "--cleanup-algorithm", "timeline"])
             print(f"{GREEN}Snapper snapshot created successfully{NC}")
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -237,7 +231,6 @@ def cmd_sync(provider, args):
                 with open(STATE_FILE, 'r') as f:
                     managed_packages = set(yaml.safe_load(f).get("packages", []))
                 
-                # Find packages that *we* managed but are no longer declared
                 to_remove = list((managed_packages - declared_packages) & installed_packages)
             except Exception as e:
                  print(f"{YELLOW}Warning: Could not read state file {STATE_FILE}. Cannot prune. {e}{NC}")
@@ -246,6 +239,8 @@ def cmd_sync(provider, args):
     
     # --- Helper Package Logic ---
     helpers_to_run = {
+        # <-- NEW: Added "flatpak" -->
+        "flatpak": (provider.install_flatpak, list(all_package_lists["flatpaks"])),
         "aur": (provider.install_aur, list(all_package_lists["arch_aur"])),
         "copr": (provider.install_copr, all_package_lists["fedora_copr"]),
         "ppa": (provider.install_ppa, all_package_lists["debian_ppa"]),
@@ -297,7 +292,6 @@ def cmd_sync(provider, args):
             print(f"{YELLOW}Cancelled{NC}")
             return
 
-    # <-- CHANGE: Call the new generic snapshot function -->
     if not args.no_backup:
         create_auto_snapshot()
 
@@ -365,13 +359,15 @@ def cmd_module_list(provider, args):
             pkg_counts = []
             if data.get("packages"):
                 pkg_counts.append(f"Packages: {len(data['packages'])}")
+            # <-- NEW: Added "flatpaks" -->
+            if data.get("flatpaks"):
+                pkg_counts.append(f"Flatpaks: {len(data['flatpaks'])}")
             if data.get("arch_aur"):
                 pkg_counts.append(f"AUR: {len(data['arch_aur'])}")
             if data.get("fedora_copr"):
                 pkg_counts.append(f"COPR: {len(data['fedora_copr'])}")
             if data.get("debian_ppa"):
                 pkg_counts.append(f"PPA: {len(data['debian_ppa'])}")
-            # (add more for OBS, Gentoo, Void)
             
             if module_name in enabled_modules:
                 status = f"{GREEN}enabled{NC}"
@@ -482,7 +478,13 @@ def cmd_status(provider, args):
     # Show counts for all helpers that have packages
     for name, pkgs in all_package_lists.items():
         if name != "packages" and pkgs:
-             print(f"  Declared: {len(pkgs)} ({name.upper()})")
+             # <-- NEW: Added "flatpaks" -->
+             if name == "flatpaks":
+                 print(f"  Declared: {len(pkgs)} (FLATPAK)")
+             elif isinstance(pkgs, dict):
+                 print(f"  Declared: {len(pkgs)} ({name.upper()} Repos)")
+             else:
+                 print(f"  Declared: {len(pkgs)} ({name.upper()})")
     
     if to_install or any(pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
         if not to_install and all(not pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
@@ -552,11 +554,12 @@ def cmd_init(provider, args):
         (STATE_DIR / ".gitignore").write_text("# Auto-generated state files\ninstalled.yaml\n")
         print(f"{GREEN}✓{NC} Created state/.gitignore")
         
-        # Create example module
+        # <-- NEW: Updated example module -->
         (PACKAGES_DIR / "modules" / "example.yaml").write_text(
             "# Example module template\n\n"
             "description: Example module - customize or delete this\n\n"
             "packages:\n  # - package1\n\n"
+            "flatpaks:\n  # - net.lutris.Lutris\n\n"
             "arch_aur:\n  # - aur_package_1\n\n"
             "fedora_copr:\n  # \"user/repo\":\n  #   - copr_package_1\n\n"
             "debian_ppa:\n  # \"ppa:user/repo\":\n  #   - ppa_package_1\n\n"
@@ -653,12 +656,10 @@ def cmd_repo(provider, args):
     except Exception as e:
         print(f"{RED}An unexpected error occurred: {e}{NC}")
 
-# <-- CHANGE: This is the new, unified backup command -->
 def cmd_backup(provider, args):
     """
     Wrapper for Snapper or Timeshift commands.
     """
-    # --- Auto-detect tool ---
     tool_cmd = None
     if shutil.which("snapper"):
         tool_cmd = ["sudo", "snapper"]
@@ -713,7 +714,6 @@ def cmd_backup(provider, args):
             else: # timeshift
                 cmd.append("--check")
         
-        # Run the constructed command
         if not run_interactive_cmd(cmd):
             print(f"{RED}Error: {tool_name} command failed.{NC}")
 
@@ -794,8 +794,7 @@ def main():
     repo_sub.add_parser("pull", help="Pull updates from other machines").set_defaults(func=cmd_repo)
     repo_sub.add_parser("status", help="Show git status").set_defaults(func=cmd_repo)
     
-    # --- Timeshift (backup/restore) ---
-    # <-- CHANGE: Updated argparse for backup -->
+    # --- Backup (Snapper/Timeshift) ---
     parser_bk = subparsers.add_parser("backup", help="Manage Snapper/Timeshift backups")
     bk_group = parser_bk.add_mutually_exclusive_group(required=True)
     bk_group.add_argument("--list", action="store_true", help="List snapshots")
@@ -817,8 +816,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # This allows the script to find the 'providers' directory
-    # when installed in /usr/local/lib/wcli/
     script_dir = Path(__file__).parent.resolve()
     sys.path.insert(0, str(script_dir))
     
