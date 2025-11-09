@@ -1,8 +1,8 @@
 
 
-All commands, paths, and installation instructions have been updated to reflect the new Python version.
 
-wcli
+
+Wcli
 
 A declarative package management CLI tool for Linux, inspired by NixOS. Supports Fedora, Arch, Debian/Ubuntu, openSUSE, Gentoo, and Void.
 
