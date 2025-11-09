@@ -105,18 +105,19 @@ def write_config(config: dict):
         print(f"{RED}Error writing {CONFIG_FILE}: {e}{NC}")
         sys.exit(1)
 
-# <-- CHANGE: This function is now more powerful.
+# <-- CHANGE: This function is now more powerful. -->
 def get_declared_packages(config: dict) -> dict:
     """
     Parses all YAMLs to get a dictionary of all declared package lists.
     """
-    #
     package_lists = {
         "packages": set(),
         "arch_aur": set(),
-        "fedora_copr": set(),
-        "debian_ppa": set(),
-        # Add more keys here as needed
+        "fedora_copr": {},
+        "debian_ppa": {},
+        "opensuse_obs": {},
+        "gentoo_overlay": {},
+        "void_src": set(),
     }
     excluded_packages = set()
     hostname = config.get('host', '')
@@ -129,11 +130,19 @@ def get_declared_packages(config: dict) -> dict:
                     if not data:
                         return
                     
-                    #
-                    for key in package_lists.keys():
+                    # Handle set-like lists
+                    for key in ["packages", "arch_aur", "void_src"]:
                         if key in data and data[key]:
                             package_lists[key].update(data[key])
-                            
+                    
+                    # Handle map-like lists
+                    for key in ["fedora_copr", "debian_ppa", "opensuse_obs", "gentoo_overlay"]:
+                         if key in data and data[key]:
+                            for repo, pkgs in data[key].items():
+                                if repo not in package_lists[key]:
+                                    package_lists[key][repo] = set()
+                                package_lists[key][repo].update(pkgs)
+
                     if "exclude" in data and data["exclude"]:
                         excluded_packages.update(data["exclude"])
                         
@@ -161,7 +170,6 @@ def get_declared_packages(config: dict) -> dict:
     package_lists["packages"] -= excluded_packages
     
     return package_lists
-    #
 
 def run_cmd(cmd: list, cwd: Path = None, check: bool = True) -> subprocess.CompletedProcess:
     """Helper to run a subprocess command."""
@@ -182,7 +190,7 @@ def create_backup():
 
 # --- Command Functions ---
 
-# <-- CHANGE: This function is now much smarter.
+# <-- CHANGE: This function is now much smarter. -->
 def cmd_sync(provider, args):
     """
     Declarative sync command.
@@ -190,7 +198,6 @@ def cmd_sync(provider, args):
     print(f"{BLUE}Loading package configuration...{NC}")
     config = load_config()
     
-    # 
     all_package_lists = get_declared_packages(config)
     declared_packages = all_package_lists["packages"]
     
@@ -212,21 +219,20 @@ def cmd_sync(provider, args):
         else:
             print(f"{YELLOW}Warning: State file not found. Cannot prune.{NC}")
     
-    # 
     # --- Helper Package Logic ---
-    #
-    
-    # AUR packages
-    to_install_aur = list(all_package_lists.get("arch_aur", set()))
-    
-    # TODO: Add logic for fedora_copr, debian_ppa here
-    
-    #
+    # Convert sets to lists for installation
+    helpers_to_run = {
+        "aur": (provider.install_aur, list(all_package_lists["arch_aur"])),
+        "copr": (provider.install_copr, all_package_lists["fedora_copr"]),
+        "ppa": (provider.install_ppa, all_package_lists["debian_ppa"]),
+        "obs": (provider.install_obs, all_package_lists["opensuse_obs"]),
+        "overlay": (provider.install_overlay, all_package_lists["gentoo_overlay"]),
+        "src": (provider.install_src, list(all_package_lists["void_src"])),
+    }
     
     # Display summary
     print(f"\n{BLUE}=== Sync Summary ==={NC}")
     
-    # 
     print(f"{BLUE}--- Official Repos ---{NC}")
     if to_install:
         print(f"{GREEN}Packages to install ({len(to_install)}):{NC}")
@@ -240,15 +246,20 @@ def cmd_sync(provider, args):
     elif args.prune:
         print(f"{GREEN}No official packages to remove{NC}")
 
-    # 
     # --- Helper Summary ---
-    #
-    if to_install_aur:
-        print(f"\n{BLUE}--- Arch AUR ---{NC}")
-        print(f"{GREEN}Packages to install ({len(to_install_aur)}):{NC}")
-        for pkg in to_install_aur: print(f"  {pkg}")
+    total_helpers = 0
+    for name, (func, packages) in helpers_to_run.items():
+        if packages:
+            total_helpers += 1
+            print(f"\n{BLUE}--- Helper: {name.upper()} ---{NC}")
+            print(f"{GREEN}Packages to install ({len(packages)}):{NC}")
+            if isinstance(packages, dict):
+                for repo, pkgs in packages.items():
+                    print(f"  From {repo}: {', '.join(pkgs)}")
+            else:
+                for pkg in packages: print(f"  {pkg}")
 
-    if not to_install and not to_remove and not to_install_aur: #
+    if not to_install and not to_remove and total_helpers == 0:
         print(f"\n{GREEN}System is already in sync!{NC}")
         return
 
@@ -265,9 +276,7 @@ def cmd_sync(provider, args):
     if not args.no_backup:
         create_backup()
 
-    # 
     # --- Run Installers ---
-    #
     
     # 1. Official Packages
     if to_install:
@@ -284,36 +293,29 @@ def cmd_sync(provider, args):
         else:
             print(f"{RED}Error: Failed to remove packages{NC}")
 
-    # 2. AUR Packages
-    if to_install_aur:
-        print(f"\n{BLUE}Installing AUR packages...{NC}")
-        # We check if the provider *has* the 'install_aur' method
-        if hasattr(provider, "install_aur"):
-            if provider.install_aur(to_install_aur):
-                print(f"{GREEN}AUR packages installed successfully{NC}")
+    # 2. Helper Packages
+    for name, (func, packages) in helpers_to_run.items():
+        if packages:
+            print(f"\n{BLUE}Installing {name.upper()} packages...{NC}")
+            if func(packages): # Call the provider's function
+                print(f"{GREEN}{name.upper()} packages installed successfully{NC}")
             else:
-                print(f"{RED}Error: Failed to install AUR packages{NC}")
-        else:
-            print(f"{YELLOW}Warning: AUR packages declared, but this system's provider ({provider.__class__.__name__}) does not support them. Skipping.{NC}")
+                print(f"{RED}Error: Failed to install {name.upper()} packages{NC}")
 
-    #
-    
     # TODO: Post-install hooks
     
     print(f"\n{BLUE}Updating state file...{NC}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        # 
+        # We only track official packages in the state file for pruning
         with open(STATE_FILE, 'w') as f:
-            # We only track official packages in the state file for pruning
             yaml.dump({"packages": sorted(list(declared_packages))}, f)
-            #
     except Exception as e:
         print(f"{RED}Error writing state file {STATE_FILE}: {e}{NC}")
         
     print(f"\n{GREEN}Sync complete!{NC}")
-    #
 
+# <-- CHANGE: Updated module list to show helper counts -->
 def cmd_module_list(provider, args):
     """
     Lists all available modules and their status.
@@ -333,10 +335,19 @@ def cmd_module_list(provider, args):
                 continue
             
             desc = data.get("description", "No description")
-            pkg_count = len(data.get("packages", []))
-            aur_count = len(data.get("arch_aur", [])) #
-            
             conflicts = ", ".join(data.get("conflicts", []))
+
+            # Get counts for all package types
+            pkg_counts = []
+            if data.get("packages"):
+                pkg_counts.append(f"Packages: {len(data['packages'])}")
+            if data.get("arch_aur"):
+                pkg_counts.append(f"AUR: {len(data['arch_aur'])}")
+            if data.get("fedora_copr"):
+                pkg_counts.append(f"COPR: {len(data['fedora_copr'])}")
+            if data.get("debian_ppa"):
+                pkg_counts.append(f"PPA: {len(data['debian_ppa'])}")
+            # (add more for OBS, Gentoo, Void)
             
             if module_name in enabled_modules:
                 status = f"{GREEN}enabled{NC}"
@@ -345,7 +356,7 @@ def cmd_module_list(provider, args):
                 
             print(f"  {BLUE}{module_name}{NC} [{status}]")
             print(f"    {desc}")
-            print(f"    Packages: {pkg_count} (Official) | {aur_count} (AUR)") #
+            print(f"    {' | '.join(pkg_counts)}")
             if conflicts:
                 print(f"    {RED}Conflicts with: {conflicts}{NC}")
             print("")
@@ -413,6 +424,7 @@ def cmd_module_disable(provider, args):
     print(f"{GREEN}Module '{module_name}' disabled{NC}")
     print("Run 'wcli sync --prune' to remove packages")
 
+# <-- CHANGE: Updated status to show helper counts -->
 def cmd_status(provider, args):
     """
     Shows the current configuration and sync status.
@@ -435,25 +447,29 @@ def cmd_status(provider, args):
         print("  (none)")
 
     # Package summary
-    all_package_lists = get_declared_packages(config) #
-    declared = all_package_lists["packages"] #
+    all_package_lists = get_declared_packages(config)
+    declared_official = all_package_lists["packages"]
     installed = provider.get_installed_packages()
-    to_install = declared - installed
+    to_install = declared_official - installed
 
     print(f"\n{BLUE}Packages:{NC}")
-    print(f"  Declared: {len(declared)} (Official)")
+    print(f"  Declared: {len(declared_official)} (Official)")
     print(f"  To install: {len(to_install)} (Official)")
     
-    # 
-    if all_package_lists.get("arch_aur"):
-        print(f"  Declared: {len(all_package_lists['arch_aur'])} (AUR)")
-    #
+    # Show counts for all helpers that have packages
+    for name, pkgs in all_package_lists.items():
+        if name != "packages" and pkgs:
+             print(f"  Declared: {len(pkgs)} ({name.upper()})")
     
-    if to_install:
-        print(f"\n{YELLOW}System is out of sync. Run 'wcli sync' to install.{NC}")
+    if to_install or any(pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
+        if not to_install and all(not pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
+             print(f"\n{GREEN}System is in sync!{NC}")
+        else:
+             print(f"\n{YELLOW}System is out of sync. Run 'wcli sync' to install.{NC}")
     else:
         print(f"\n{GREEN}System is in sync!{NC}")
 
+# <-- CHANGE: Updated init to create example helper keys -->
 def cmd_init(provider, args):
     """
     Initializes the wcli-config directory structure.
@@ -514,18 +530,18 @@ def cmd_init(provider, args):
         (STATE_DIR / ".gitignore").write_text("# Auto-generated state files\ninstalled.yaml\n")
         print(f"{GREEN}✓{NC} Created state/.gitignore")
         
-        # 
         # Create example module
         (PACKAGES_DIR / "modules" / "example.yaml").write_text(
             "# Example module template\n\n"
             "description: Example module - customize or delete this\n\n"
-            "packages:\n  # - package1\n  # - package2\n\n"
+            "packages:\n  # - package1\n\n"
             "arch_aur:\n  # - aur_package_1\n\n"
+            "fedora_copr:\n  # \"user/repo\":\n  #   - copr_package_1\n\n"
+            "debian_ppa:\n  # \"ppa:user/repo\":\n  #   - ppa_package_1\n\n"
             "conflicts: []\n\n"
             "post_install_hook: \"\"\n"
         )
-        print(f"{GREEN}✓{NC} Created example module (with 'arch_aur' key)")
-        #
+        print(f"{GREEN}✓{NC} Created example module (with helper keys)")
         
         # Create README.md
         (SYS_CONFIG_DIR / "README.md").write_text(
