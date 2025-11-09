@@ -3,14 +3,14 @@ import subprocess
 import shutil
 from .base_provider import BaseProvider
 
-# <-- NEW: Add colors -->
 YELLOW = '\033[1;33m'
 NC = '\033[0m'
+RED = '\033[0;31m'
+BLUE = '\033[0;34m'
 
 def run_cmd(cmd: list) -> bool:
     """Helper to run a subprocess command."""
     try:
-        # Use subprocess.run directly for output streaming
         subprocess.run(cmd, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -20,7 +20,6 @@ class Provider(BaseProvider):
     """Arch Linux provider implementation."""
 
     def __init__(self):
-        # --- NEW: Check for AUR helper ---
         self.helper_cmd = None
         if shutil.which("paru"):
             self.helper_cmd = "paru"
@@ -62,13 +61,16 @@ class Provider(BaseProvider):
             return set()
 
     def get_deps(self) -> dict:
+        # <-- CHANGE: Added snapper -->
         return {
             "yq": "sudo pacman -S go-yq",
             "timeshift": "sudo pacman -S timeshift",
+            "snapper": "sudo pacman -S snapper",
             "paru": "(Install 'paru' or 'yay' from the AUR)"
         }
 
     def get_base_packages(self) -> dict:
+        # <-- CHANGE: Added timeshift (common Arch default) -->
         return {
             "description": "Base packages for all Arch machines",
             "packages": [
@@ -78,19 +80,18 @@ class Provider(BaseProvider):
                 "networkmanager",
                 "vim",
                 "git",
-                "go-yq"
+                "go-yq",
+                "timeshift"
             ],
             "arch_aur": [
-                "paru" # We can use wcli to install its own helper!
+                "paru" 
             ]
         }
 
-    # --- NEW: AUR Helper Function ---
     def install_aur(self, packages: list) -> bool:
         if not self.helper_cmd:
             print(f"{RED}Error: No AUR helper found. Cannot install packages.{NC}")
             return False
         
-        # We run this as the regular user, not sudo
-        # paru/yay will ask for sudo password when needed.
+        print(f"{BLUE}Using '{self.helper_cmd}' to install AUR packages...{NC}")
         return run_cmd([self.helper_cmd, "-S", "--noconfirm", "--needed"] + packages)
