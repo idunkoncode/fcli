@@ -339,6 +339,34 @@ Priority order:
 
     5. Apply exclusions
 
+
+Uninstalling is simple. The `install.sh` script copied the files to `/usr/local/lib/wcli` and created a symbolic link in `/usr/local/bin/`.
+
+You just need to remove those two things.
+
+### 1\. Remove the Program Files
+
+Run these two commands to remove the `wcli` executable and its `providers` package:
+
+    bash
+    # 1. Remove the symbolic link from your PATH
+    sudo rm /usr/local/bin/wcli
+
+    # 2. Remove the actual program directory
+    sudo rm -rf /usr/local/lib/wcli
+    ```
+
+The program is now uninstalled.
+
+### 2\. (Optional) Remove Your Config Files
+
+The program also created a configuration directory in your home folder when you ran `wcli init`. This is kept separate so you don't lose your configs when you update.
+
+If you want to remove your personal configuration as well, run this command (**this will delete all your YAML files**):
+
+    bash
+    rm -rf ~/.config/wcli-config
+    ```
 License
 
 MIT License - feel free to use and modify as needed.
