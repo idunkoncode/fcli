@@ -19,7 +19,6 @@ class Provider(BaseProvider):
     """Void Linux provider implementation."""
     
     def __init__(self):
-        # --- NEW: Setup void-packages path ---
         self.src_repo_path = Path.home() / "void-packages"
         if not shutil.which("xbps-src"):
              print(f"{YELLOW}Warning: 'xbps-src' not found. 'void_src' packages will not work.{NC}")
@@ -46,13 +45,10 @@ class Provider(BaseProvider):
                 ["xbps-query", "-l"],
                 capture_output=True, text=True, check=True, errors='ignore'
             )
-            # output is 'name-version-revision'
             packages = set()
             for line in result.stdout.strip().split('\n'):
                 if line:
-                    # Split 'ii name-version-rev comment'
                     pkg_full = line.split(' ')[1]
-                    # Get name from 'name-version-rev'
                     pkg_name = pkg_full.rsplit('-', 2)[0]
                     packages.add(pkg_name)
             return packages
@@ -60,13 +56,16 @@ class Provider(BaseProvider):
             return set()
 
     def get_deps(self) -> dict:
+        # <-- CHANGE: Added snapper -->
         return {
             "yq": "sudo xbps-install -y yq",
             "timeshift": "sudo xbps-install -y timeshift",
+            "snapper": "sudo xbps-install -y snapper",
             "xtools": "sudo xbps-install -y xtools"
         }
 
     def get_base_packages(self) -> dict:
+        # <-- CHANGE: Added timeshift (Void default) -->
         return {
             "description": "Base packages for all Void machines",
             "packages": [
@@ -74,14 +73,14 @@ class Provider(BaseProvider):
                 "vim",
                 "git",
                 "yq",
-                "xtools" # For xbps-src
+                "xtools", # For xbps-src
+                "timeshift"
             ],
             "void_src": [
-                "heroic" # Example
+                "heroic"
             ]
         }
 
-    # --- NEW: Void Src Helper Function ---
     def install_src(self, packages: list) -> bool:
         if not self.can_build_src:
             print("Error: 'xbps-src' not found. Cannot build from source.")
@@ -94,7 +93,6 @@ class Provider(BaseProvider):
                 print("Error: Failed to clone void-packages repo.")
                 return False
         
-        # Update repo and bootstrap
         print("Updating void-packages repo...")
         if not run_cmd(["git", "pull", "origin", "master"], cwd=self.src_repo_path):
             print("Warning: 'git pull' failed, proceeding anyway...")
@@ -103,7 +101,6 @@ class Provider(BaseProvider):
             print("Error: './xbps-src bootstrap-update' failed.")
             return False
             
-        # Build packages
         all_ok = True
         for pkg in packages:
             print(f"Building {pkg} from source...")
@@ -111,7 +108,6 @@ class Provider(BaseProvider):
                 print(f"Warning: Failed to build {pkg}")
                 all_ok = False
         
-        # Install all successfully built packages
         print("Installing built packages...")
         repo_path = self.src_repo_path / "host/binpkgs"
         if not run_cmd(["sudo", "xbps-install", f"--repository={repo_path}", "-y"] + packages):
