@@ -75,11 +75,11 @@ class Provider(BaseProvider):
             "yq": "sudo apt install yq",
             "timeshift": "sudo apt install timeshift",
             "snapper": "sudo apt install snapper",
+            "flatpak": "sudo apt install flatpak",
             "software-properties-common": "sudo apt install software-properties-common",
             "dirmngr": "sudo apt install dirmngr"
         }
 
-    # <-- CHANGE: Added dirmngr to base packages -->
     def get_base_packages(self) -> dict:
         return {
             "description": "Base packages for all Debian-based machines",
@@ -91,8 +91,9 @@ class Provider(BaseProvider):
                 "git",
                 "yq",
                 "software-properties-common",
-                "dirmngr", # <-- This is the key fix
-                "timeshift"
+                "dirmngr",
+                "timeshift",
+                "flatpak"
             ],
             "debian_ppa": {
                 "ppa:lutris-team/lutris": ["lutris"]
