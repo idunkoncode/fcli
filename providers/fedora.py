@@ -5,6 +5,7 @@ from .base_provider import BaseProvider
 def run_cmd(cmd: list) -> bool:
     """Helper to run a subprocess command."""
     try:
+        # Use subprocess.run directly for output streaming
         subprocess.run(cmd, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -36,12 +37,15 @@ class Provider(BaseProvider):
             return set()
 
     def get_deps(self) -> dict:
+        # <-- CHANGE: Added snapper -->
         return {
             "yq": "sudo dnf install yq",
-            "timeshift": "sudo dnf install timeshift"
+            "timeshift": "sudo dnf install timeshift",
+            "snapper": "sudo dnf install snapper"
         }
 
     def get_base_packages(self) -> dict:
+        # <-- CHANGE: Added snapper (Fedora default) -->
         return {
             "description": "Base packages for all Fedora machines",
             "packages": [
@@ -51,14 +55,14 @@ class Provider(BaseProvider):
                 "NetworkManager",
                 "vim-enhanced",
                 "git",
-                "yq"
+                "yq",
+                "snapper"
             ],
             "fedora_copr": {
                 "atim/heroic-games-launcher": ["heroic-games-launcher"]
             }
         }
 
-    # --- NEW: COPR Helper Function ---
     def install_copr(self, copr_map: dict) -> bool:
         all_ok = True
         all_packages = []
