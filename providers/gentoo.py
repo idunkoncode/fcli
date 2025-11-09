@@ -18,7 +18,6 @@ class Provider(BaseProvider):
     """Gentoo provider implementation."""
 
     def __init__(self):
-        # --- NEW: Check for eselect-repository ---
         if not shutil.which("eselect"):
             print(f"{YELLOW}Warning: 'eselect' not found. Overlays will not work.{NC}")
             print("Please install 'app-eselect/eselect-repository'.")
@@ -41,12 +40,10 @@ class Provider(BaseProvider):
 
     def get_installed_packages(self) -> set:
         try:
-            # Requires app-portage/portage-utils
             result = subprocess.run(
                 ["qlist", "-I"],
                 capture_output=True, text=True, check=True, errors='ignore'
             )
-            # qlist output is 'category/name', we only want 'name'
             packages = set()
             for line in result.stdout.strip().split('\n'):
                 if '/' in line:
@@ -58,30 +55,33 @@ class Provider(BaseProvider):
             return set()
 
     def get_deps(self) -> dict:
+        # <-- CHANGE: Added snapper -->
         return {
             "yq": "sudo emerge app-misc/yq",
             "timeshift": "sudo emerge app-backup/timeshift",
+            "snapper": "sudo emerge sys-fs/snapper",
             "portage-utils": "sudo emerge app-portage/portage-utils",
             "eselect-repository": "sudo emerge app-eselect/eselect-repository"
         }
 
     def get_base_packages(self) -> dict:
+        # <-- CHANGE: Added snapper (Gentoo/Btrfs default) -->
         return {
             "description": "Base packages for all Gentoo machines",
             "packages": [
-                "app-portage/portage-utils", # For qlist
-                "app-eselect/eselect-repository", # For overlays
+                "app-portage/portage-utils", 
+                "app-eselect/eselect-repository", 
                 "app-misc/yq",
                 "net-misc/networkmanager",
                 "app-editors/vim",
-                "dev-vcs/git"
+                "dev-vcs/git",
+                "sys-fs/snapper"
             ],
             "gentoo_overlay": {
                 "guru": []
             }
         }
 
-    # --- NEW: Gentoo Overlay Helper Function ---
     def install_overlay(self, overlay_map: dict) -> bool:
         if not self.can_add_overlay:
             print("Error: 'eselect repository' is not available. Cannot add overlays.")
@@ -91,7 +91,6 @@ class Provider(BaseProvider):
         all_packages = []
         needs_sync = False
         
-        # Get list of enabled repos
         try:
             result = subprocess.run(["eselect", "repository", "list", "-i"], capture_output=True, text=True, check=True)
             enabled_repos = result.stdout
