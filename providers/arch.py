@@ -1,11 +1,16 @@
-
 # providers/arch.py
 import subprocess
+import shutil
 from .base_provider import BaseProvider
+
+# <-- NEW: Add colors -->
+YELLOW = '\033[1;33m'
+NC = '\033[0m'
 
 def run_cmd(cmd: list) -> bool:
     """Helper to run a subprocess command."""
     try:
+        # Use subprocess.run directly for output streaming
         subprocess.run(cmd, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -14,6 +19,16 @@ def run_cmd(cmd: list) -> bool:
 class Provider(BaseProvider):
     """Arch Linux provider implementation."""
 
+    def __init__(self):
+        # --- NEW: Check for AUR helper ---
+        self.helper_cmd = None
+        if shutil.which("paru"):
+            self.helper_cmd = "paru"
+        elif shutil.which("yay"):
+            self.helper_cmd = "yay"
+        else:
+            print(f"{YELLOW}Warning: No AUR helper (paru, yay) found. 'arch_aur' packages will be skipped.{NC}")
+
     def install(self, packages: list) -> bool:
         return run_cmd(["sudo", "pacman", "-S", "--noconfirm", "--needed"] + packages)
 
@@ -21,12 +36,20 @@ class Provider(BaseProvider):
         return run_cmd(["sudo", "pacman", "-Rs", "--noconfirm"] + packages)
 
     def update(self) -> bool:
-        print("Note: 'update' uses 'paru'. Ensure it's installed.")
-        return run_cmd(["paru", "-Syu", "--noconfirm"])
+        if self.helper_cmd:
+            print(f"Note: 'update' uses '{self.helper_cmd}'.")
+            return run_cmd([self.helper_cmd, "-Syu", "--noconfirm"])
+        else:
+            print("Note: No AUR helper found. Only running pacman.")
+            return run_cmd(["sudo", "pacman", "-Syu", "--noconfirm"])
 
     def search(self, package: str) -> bool:
-        print("Note: 'search' uses 'paru'. Ensure it's installed.")
-        return run_cmd(["paru", package])
+        if self.helper_cmd:
+            print(f"Note: 'search' uses '{self.helper_cmd}'.")
+            return run_cmd([self.helper_cmd, "-Ss", package])
+        else:
+            print("Note: No AUR helper found. Only running pacman.")
+            return run_cmd(["pacman", "-Ss", package])
 
     def get_installed_packages(self) -> set:
         try:
@@ -42,7 +65,7 @@ class Provider(BaseProvider):
         return {
             "yq": "sudo pacman -S go-yq",
             "timeshift": "sudo pacman -S timeshift",
-            "paru": "(Install from AUR)"
+            "paru": "(Install 'paru' or 'yay' from the AUR)"
         }
 
     def get_base_packages(self) -> dict:
@@ -56,5 +79,18 @@ class Provider(BaseProvider):
                 "vim",
                 "git",
                 "go-yq"
+            ],
+            "arch_aur": [
+                "paru" # We can use wcli to install its own helper!
             ]
         }
+
+    # --- NEW: AUR Helper Function ---
+    def install_aur(self, packages: list) -> bool:
+        if not self.helper_cmd:
+            print(f"{RED}Error: No AUR helper found. Cannot install packages.{NC}")
+            return False
+        
+        # We run this as the regular user, not sudo
+        # paru/yay will ask for sudo password when needed.
+        return run_cmd([self.helper_cmd, "-S", "--noconfirm", "--needed"] + packages)
