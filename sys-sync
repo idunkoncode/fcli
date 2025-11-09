@@ -54,6 +54,16 @@ case $DISTRO_ID in
         DEP_YQ_INSTALL="sudo dnf install yq"
         DEP_TS_INSTALL="sudo dnf install timeshift"
         ;;
+    opensuse)
+        echo -e "${BLUE}Fedora system detected${NC}"
+        CMD_INSTALL="sudo zypper install -y"
+        CMD_REMOVE="sudo zypper remove -y"
+        CMD_UPDATE="sudo zypper update -y"
+        CMD_SEARCH="zypper search"
+        CMD_LIST_INSTALLED="rpm -qa --qf '%{NAME}\n'"
+        DEP_YQ_INSTALL="sudo zypper install yq"
+        DEP_TS_INSTALL="sudo zypper install timeshift"
+        ;;
     arch)
         echo -e "${BLUE}Arch Linux system detected${NC}"
         # Assumes paru (or another AUR helper) for update/search
