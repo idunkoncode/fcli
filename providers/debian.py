@@ -22,7 +22,6 @@ class Provider(BaseProvider):
     """Debian/Ubuntu provider implementation."""
     
     def __init__(self):
-        # --- NEW: Check for add-apt-repository ---
         if not shutil.which("add-apt-repository"):
             print(f"{YELLOW}Warning: 'add-apt-repository' not found. PPAs will not work.{NC}")
             print("Please install 'software-properties-common'.")
@@ -54,13 +53,16 @@ class Provider(BaseProvider):
             return set()
 
     def get_deps(self) -> dict:
+        # <-- CHANGE: Added snapper -->
         return {
             "yq": "sudo apt install yq",
             "timeshift": "sudo apt install timeshift",
+            "snapper": "sudo apt install snapper",
             "software-properties-common": "sudo apt install software-properties-common"
         }
 
     def get_base_packages(self) -> dict:
+        # <-- CHANGE: Added timeshift (Debian/Ubuntu default) -->
         return {
             "description": "Base packages for all Debian-based machines",
             "packages": [
@@ -70,14 +72,14 @@ class Provider(BaseProvider):
                 "vim",
                 "git",
                 "yq",
-                "software-properties-common"
+                "software-properties-common",
+                "timeshift"
             ],
             "debian_ppa": {
                 "ppa:lutris-team/lutris": ["lutris"]
             }
         }
 
-    # --- NEW: PPA Helper Function ---
     def install_ppa(self, ppa_map: dict) -> bool:
         if not self.can_add_ppa:
             print("Error: 'add-apt-repository' is not available. Cannot add PPAs.")
@@ -89,7 +91,8 @@ class Provider(BaseProvider):
         
         for ppa, packages in ppa_map.items():
             # This is a simple check; a robust version would check /etc/apt/sources.list.d/
-            if not os.path.exists(f"/etc/apt/sources.list.d/{ppa.split(':')[1].replace('/', '-')}.list"):
+            ppa_file = Path(f"/etc/apt/sources.list.d/{ppa.split(':')[1].replace('/', '-')}.list")
+            if not ppa_file.exists():
                 print(f"Adding PPA: {ppa}")
                 if not run_cmd(["sudo", "add-apt-repository", "-y", ppa]):
                     print(f"Warning: Failed to add PPA: {ppa}")
