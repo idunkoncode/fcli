@@ -14,7 +14,6 @@ def _run_cmd_interactive(cmd: list) -> bool:
     that streams output to the user.
     """
     try:
-        # Runs the command and streams STDOUT/STDERR to the user's terminal
         subprocess.run(cmd, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -39,8 +38,8 @@ class BaseProvider(ABC):
         pass
 
     @abstractmethod
-    def update(self) -> bool:
-        """Update all system packages."""
+    def update(self, ignore_list: list) -> bool: # <-- CHANGED
+        """Update all system packages, ignoring any in ignore_list."""
         pass
 
     @abstractmethod
@@ -63,11 +62,41 @@ class BaseProvider(ABC):
         """Return a dict of base packages for the 'init' command."""
         pass
 
+    # --- NEW: Abstract methods for version pinning ---
+
+    @abstractmethod
+    def get_package_version(self, package: str) -> str:
+        """Return the installed version string of a single package."""
+        pass
+    
+    @abstractmethod
+    def get_installed_packages_with_versions(self) -> dict:
+        """Return a dict of {pkg_name: version} for all installed packages."""
+        pass
+    
+    @abstractmethod
+    def compare_versions(self, v1: str, v2: str) -> int:
+        """
+        Compare two version strings.
+        Returns: 1 if v1 > v2, 0 if v1 == v2, 2 if v1 < v2
+        """
+        pass
+        
+    @abstractmethod
+    def show_package_versions(self, package: str):
+        """Prints installed, available, and cached versions of a package."""
+        pass
+
     # --- Optional Helper Methods ---
     
     def _unsupported(self, feature_name: str) -> bool:
         """Default function for unsupported features."""
         print(f"{YELLOW}Warning: {feature_name} packages are declared, but this system's provider ({self.__class__.__name__}) does not support them. Skipping.{NC}")
+        return False
+
+    # --- NEW: Optional downgrade method ---
+    def downgrade(self, package: str, version: str) -> bool:
+        print(f"{YELLOW}Warning: Downgrading is not explicitly supported by the {self.__class__.__name__} provider. Skipping {package}.{NC}")
         return False
 
     def install_aur(self, packages: list) -> bool: return self._unsupported("AUR")
@@ -77,11 +106,9 @@ class BaseProvider(ABC):
     def install_overlay(self, overlay_map: dict) -> bool: return self._unsupported("Gentoo Overlay")
     def install_src(self, packages: list) -> bool: return self._unsupported("Void Src")
 
-    # --- Universal Flatpak Installer ---
     def install_flatpak(self, packages: list) -> bool:
         """
         Installs a list of Flatpaks.
-        This logic is universal and shared by all providers.
         """
         if not shutil.which("flatpak"):
             print(f"{RED}Error: 'flatpak' command not found. Cannot install Flatpaks.{NC}")
@@ -89,7 +116,6 @@ class BaseProvider(ABC):
             print(f"Please install it first: {deps.get('flatpak', 'sudo <your-package-manager> install flatpak')}")
             return False
         
-        # We must add flathub if it's not already added
         try:
             repo_list = subprocess.run(["flatpak", "remotes", "--columns=name"], capture_output=True, text=True, check=True).stdout
             if "flathub" not in repo_list:
@@ -101,5 +127,4 @@ class BaseProvider(ABC):
             print(f"{RED}Error checking flatpak remotes: {e}{NC}")
             return False
 
-        # Install the packages
         return _run_cmd_interactive(["sudo", "flatpak", "install", "-y", "--non-interactive", "flathub"] + packages)
