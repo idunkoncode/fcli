@@ -1,372 +1,242 @@
+Here is the updated `README.md` file for your `wcli` project.
 
+It has been fully converted from the old `dcli` to match your new multi-distro Python tool, including the new helper-package syntax and the advanced version-pinning commands.
 
+-----
 
+# wcli
 
-Wcli
+A declarative, multi-distro package management CLI for Linux, inspired by NixOS.
 
-A declarative package management CLI tool for Linux, inspired by NixOS. Supports Fedora, Arch, Debian/Ubuntu, openSUSE, Gentoo, and Void.
+`wcli` provides a declarative YAML-based system to manage packages across multiple machines and distributions, including Fedora, Arch, Debian/Ubuntu, openSUSE, Gentoo, and Void.
 
-Features
+## Features
 
-*** Declarative Package Management: Define your packages in YAML files and sync your system to match.
+  - **Multi-Distro Support**: Works as a wrapper for `dnf`, `apt`, `pacman`, `zypper`, `emerge`, and `xbps`.
+  - **Declarative Package Management**: Define your packages in YAML files and `wcli sync` your system to match.
+  - [cite\_start]**Advanced Helper Support**: Natively manages packages from **Flatpak**, **AUR**[cite: 508], **COPR**, **PPA**, **OBS**, **Gentoo Overlays**, and **xbps-src**.
+  - [cite\_start]**Version Pinning**: Constrain packages to exact, minimum, or maximum versions [cite: 176, 215-219, 432-472].
+  - [cite\_start]**Smart Updates**: `wcli update` automatically respects your pinned packages [cite: 173, 418-422].
+  - [cite\_start]**Snapshot Integration**: Auto-detects and uses **Snapper** or **Timeshift** for automatic backups before changes[cite: 177, 501].
+  - **Module System**: Organize packages into reusable modules (e.g., `gaming`, `development`).
+  - **Host-Specific Configs**: Maintain different package sets for different machines.
+  - [cite\_start]**Git Integration**: Built-in `repo` commands to sync your config across machines[cite: 178, 352].
 
-*** Module System: Organize packages into reusable modules (gaming, development, etc.).
+## Installation
 
-*** Host-Specific Configurations: Maintain different package sets per machine.
+### Prerequisites
 
-*** Automatic Backups: Integrates with Timeshift for automatic snapshots before changes.
-    
-*** Conflict Detection: Prevents enabling conflicting modules.
+  - A supported Linux distribution (Fedora, Arch, Debian, openSUSE, etc.)
+  - `python3`
+  - `python3-yaml` (e.g., `sudo apt install python3-yaml` or `sudo dnf install python3-pyyaml`)
+  - `git` (for `repo` commands)
+  - **Optional:** `snapper` or `timeshift` for snapshot support.
 
-*** Post-Install Hooks: (Future feature) Run scripts after package installation.
-    
-*** Package Management Shortcuts: Quick wrappers around native package managers (dnf, apt, pacman, etc.).
+### Install
 
-Installation
+The installer will ask for your `sudo` password to copy files.
 
-Prerequisites
+```bash
+# 1. Clone the repository
+git clone https://your-repo-url/wcli.git
+cd wcli
 
-* A supported Linux distribution (Fedora, Arch, Debian, openSUSE, Gentoo, Void)
-    
-* python3
-     
-* python3-yaml (or pip install pyyaml)
-    
-* git (for repository management)
-     
-* timeshift (optional, for backup functionality)
-  
-Install
-    
-    # Clone the repository (or download the files)
-    git clone https://.../your-wcli-project.git
-    cd wcli-project
-    ./install.sh
+# 2. Run the installer
+bash install.sh
+```
 
 The installer will:
 
-    Create /usr/local/lib/wcli/ (requires sudo)
-    Copy the wcli executable and the providers/ package into it
-    Symlink wcli to /usr/local/bin/wcli for system-wide access
-    Verify the installation
+1.  Detect your distro and ask to install `snapper` or `timeshift`.
+2.  Create `/usr/local/lib/wcli/` and copy the `wcli` script and `providers/` package into it.
+3.  Create a symlink from `/usr/local/bin/wcli` so you can run it from anywhere.
 
-Initialize Configuration
-After installation, initialize your configuration directory:
-    
-    Bash
-    wcli init
+### Initialize Configuration
 
-Declarative Package Management
+After installation, run the `init` command to create your config files:
 
-Define Base Packages
-    
-*** Edit ~/.config/wcli-config/packages/base.yaml. The wcli init command will have already pre-filled this with ensible defaults for your OS.
+```bash
+wcli init
+```
 
-Define Host-Specific Packages
-    
-***Edit ~/.config/wcli-config/packages/hosts/{hostname}.yaml:
+This creates `~/.config/wcli-config/` with:
 
-    YAML
-    # Packages specific to this machine
-    description: Packages specific to my-laptop
-    packages:
-      - tlp
-      - powertop
-    exclude: []
+  - `config.yaml`: Main configuration (with your hostname auto-detected).
+  - `packages/base.yaml`: Base packages for your *specific* distribution.
+  - `packages/hosts/{your-hostname}.yaml`: Host-specific packages.
+  - `packages/modules/`: Optional package modules.
+  - `scripts/`: For post-install hooks.
+  - `state/`: Auto-generated state files (git-ignored).
 
-Create Modules
+#### Bootstrap (Optional)
 
-Create ~/.config/wcli-config/packages/modules/gaming.yaml:
+[cite\_start]To start with a pre-made configuration, you can bootstrap from the original `dcli` config repo[cite: 338, 473]:
 
-    YAML
-    # Gaming packages and tools
-    description: Gaming packages and tools
+```bash
+wcli init --bootstrap
+```
 
-    packages:
-      - steam
-      - lutris
-      - wine
-      - gamemode
+This will clone the config, remove its git history, and set it up for you.
 
-    conflicts: []
-    post_install_hook: ""
+## Usage
 
-Enable/Disable Modules
+### Package Management
 
-    Bash
+```bash
+[cite_start]wcli update                    # Update system, respecting version pins [cite: 173]
+wcli search <package-name>     # Search native repos (and AUR on Arch)
+wcli install <package>         # Install one or more packages
+wcli remove <package>          # Remove one or more packages
+```
 
-    wcli module list                # Show all modules and their status
-    wcli module enable gaming       # Enable gaming module
-    wcli module disable gaming      # Disable gaming module
+### Declarative Management
 
-Sync Packages
+```bash
+[cite_start]wcli sync                       # Install/upgrade/downgrade to match config [cite: 174]
+wcli sync --prune               # Also remove packages not in config
+wcli sync --dry-run             # Show what would be changed
+wcli sync --force               # Skip confirmation prompts
+[cite_start]wcli sync --no-backup           # Skip snapshot creation [cite: 241]
+```
 
-    Bash
+### Module Management
 
-    wcli sync                       # Preview and install missing packages
-    wcli sync --dry-run             # Show what would be installed/removed
-    wcli sync --prune               # Also remove packages not in config
-    wcli sync --force               # Skip confirmation prompts
-    wcli sync --no-backup           # Skip Timeshift backup
+```bash
+wcli module list                # Show all available modules
+wcli module enable <name>       # Enable a module in your config.yaml
+wcli module disable <name>      # Disable a module
+```
 
-Check Status
+### Status
 
-    Bash
+```bash
+[cite_start]wcli status                     # Show config and see if you are in sync [cite: 175]
+```
 
-    wcli status                     # Show configuration and sync status
+## Configuration Structure
 
-Timeshift Backup Commands
+`wcli` works by merging YAML files. You define *what* you want, and `wcli` figures out *how* to install it on your current distro.
 
-    Bash
+### Example Module (with Helpers & Pinning)
 
-    wcli backup --create              # Create snapshot
-    wcli backup --list                # List snapshots
-    wcli backup --restore             # Restore snapshot (interactive)
-    wcli backup --restore --snapshot <snapshot> # Restore specific snapshot
-    wcli backup --delete <snapshot>   # Delete snapshot
-    wcli backup --check               # Check snapshot integrity
+Create `~/.config/wcli-config/packages/modules/gaming.yaml`:
 
-Module System
+```yaml
+description: Gaming packages and tools
 
-Modules allow you to organize packages by purpose and enable/disable them as needed.
+# 1. Official packages (works on all distros)
+packages:
+  - steam
+  - gamemode
+  # Version Pinning:
+  - { name: wine, version: ">=9.0" } # Minimum version
+  - { name: mangohud, version: "0.7.1-1" } # Exact version
 
-Module Structure
+# 2. Universal packages
+flatpaks:
+  - net.lutris.Lutris
+  - com.heroicgameslauncher.hgl
 
-    YAML
+# 3. Distro-specific helpers
+arch_aur:
+  - { name: proton-ge-custom }
 
-    # Module description
-    description: Module description
+debian_ppa:
+  "ppa:graphics-drivers/ppa":
+    - nvidia-driver-550
 
-    # List of packages
-    packages:
-      - package1
-      - package2
+fedora_copr:
+  "atim/heroic-games-launcher":
+    - heroic-games-launcher
+```
 
-    # Conflicting modules
-    conflicts:
-      - other-module
+## Version Pinning
 
-    # Optional post-install script (relative to config dir)
-    post_install_hook: scripts/my-setup.sh
+[cite\_start]You can control package versions directly in your YAML files [cite: 176, 215-219, 432-472].
 
-Conflict Detection
-If two modules conflict (e.g., different window managers), wcli will:
+  - **Latest:** `package-name`
+  - **Exact:** `{ name: package-name, version: "1.2.3-1" }`
+  - **Minimum:** `{ name: package-name, version: ">=1.2.0" }`
 
-    1. Detect the conflict when enabling
-    2. Prompt to disable the conflicting module
-    3. Prevent both from being enabled simultaneously
+`wcli` provides commands to manage these pins in your `config.yaml`:
 
-Repository Management
+```bash
+# Pin 'firefox' to its currently installed version
+wcli pin firefox
 
-wcli includes built-in git commands to make managing your configuration across multiple computers easy.
+# Pin 'python' to a specific version
+wcli pin python 3.11.5
 
-First Computer Setup
+# Remove the pin and let 'firefox' update normally
+wcli unpin firefox
 
-After running wcli init, set up version control:
+# See installed, available, and cached versions
+wcli versions firefox
 
-    Bash
-    wcli repo init
+# Check if any installed packages violate your pins
+wcli outdated
 
-    This will:
-    * Initialize a git repository in ~/.config/wcli-config/
-    * Create a .gitignore to ignore your local config.yaml and state/
-    * Make an initial commit.
-    * You can then add your remote: git remote add origin <your-git-repo-url>
+# Create a lockfile of *all* installed packages
+wcli lock
+```
 
-Additional Computer Setup
+## Snapshot Management (Snapper & Timeshift)
 
-On your second computer, after installing wcli:
-    
-    Bash
-    wcli repo clone --url <your-git-repo-url>
+`wcli` auto-detects `snapper` or `timeshift` and uses the best one available.
 
-This will:
+```bash
+[cite_start]wcli backup --create              # Create a new snapshot [cite: 177]
+wcli backup --list                # List all snapshots
+wcli backup --restore             # Restore snapshot (interactive for Timeshift)
+wcli backup --delete <ID>         # Delete a snapshot by ID/name
+wcli backup --check               # Check snapshot integrity (Timeshift only)
+```
 
-    Clone your wcli-config repository to ~/.config/wcli-config
-    It's now ready to use. Run wcli sync.
+## Repository Management (Git)
 
-Syncing Changes
+[cite\_start]Use these commands to sync your `~/.config/wcli-config` directory across multiple machines[cite: 178, 352].
 
-Push your changes: (After enabling/disabling modules or editing package files)
+### First Computer
 
-    Bash
-    # Commit and push with a default message
-    wcli repo push
+```bash
+# After running 'wcli init'
+wcli repo init
+# Now, add your remote manually
+git remote add origin <your-git-repo-url>
+wcli repo push
+```
 
-    # Add a custom message
-    wcli repo push -m "Added development module"
+### Additional Computers
 
-Pull updates from other machines:
+```bash
+# After installing wcli
+wcli repo clone --url <your-git-repo-url>
 
-    Bash
-    wcli repo pull
+# Your config is ready. Run sync.
+wcli sync
+```
 
-Check status:
+### Daily Workflow
 
-    Bash
-    wcli repo status
+```bash
+# Push local changes (e.g., new module)
+wcli repo push -m "Add development module"
 
-Multi-Machine Workflow
+# Pull changes from another machine
+wcli repo pull
 
-Scenario: Add a new module on your desktop, use it on your laptop
+# See local changes
+wcli repo status
+```
 
-On desktop:
+## Troubleshooting
 
-    Bash
-    # Create and enable a new module
-    vim ~/.config/wcli-config/packages/modules/development.yaml
-    wcli module enable development
-    wcli sync
-
-    # Push changes
-    wcli repo push -m "Add development module"
-
-On laptop:
-
-    Bash
-    # Pull the changes
-    wcli repo pull
-
-    # Enable the module and install
-    wcli module enable development
-    wcli sync
-
-Repository Structure
-
-Your repository will look like this:
-
-    my-wcli-config/
-    ├── .gitignore              # config.yaml is auto-ignored
-    ├── packages/
-    │   ├── base.yaml          # Shared across all machines
-    │   ├── modules/           # Shared modules
-    │   │   ├── gaming.yaml
-    │   │   ├── development.yaml
-    │   │   └── ...
-    │   └── hosts/             # Machine-specific configs
-    │       ├── desktop.yaml   # Your desktop config
-    │       └── laptop.yaml    # Your laptop config  
-    ├── scripts/               # Shared scripts
-    └── README.md
-
-Each machine maintains its own config.yaml (git-ignored) with the correct hostname and enabled modules.
-Advanced Usage
-
-Environment Variables
-
-    SYS_CONFIG_DIR - Override the default config location (~/.config/wcli-config)
-    Bash
-    SYS_CONFIG_DIR=/custom/path wcli sync
-
-Example Workflows
-
-Setting up a new gaming machine
-
-    Bash
-    # Install wcli
-    git clone https://.../your-wcli-project.git
-    cd wcli-project
-    ./install.sh
-
-    # Initialize configuration
-    wcli init
-
-    # Enable gaming modules
-    wcli module enable gaming
-
-    # Sync system
-    wcli sync
-
-Maintaining multiple machines
-
-    Bash
-    # On first machine, after 'wcli init'
-    cd ~/.config/wcli-config
-    wcli repo init
-    git remote add origin git@gitlab.com:yourname/wcli-config.git
-    wcli repo push
-
-    # On second machine (after installing wcli)
-    wcli repo clone --url git@gitlab.com:yourname/wcli-config.git
-    wcli sync
-
-Troubleshooting
-
-wcli: command not found
-
-Your shell might have cached the command. Try:
-Bash
-
-hash -r  # Refresh shell's command cache
-
-Or restart your terminal.
-
-Sync fails with package conflicts
-
-This can happen if two packages provide the same file. Use your native package manager to resolve the conflict manually, then run wcli sync again.
-
-Missing PyYAML dependency
-
-wcli requires the python3-yaml library.
-    
-    Bash
-    # For Debian/Ubuntu
-    sudo apt install python3-yaml
-
-    # For Fedora
-    sudo dnf install python3-pyyaml
-
-    # Or with pip
-    pip install pyyaml
-
-Architecture
-
-    Base packages: Installed on all machines (packages/base.yaml)
-    Host-specific packages: Unique to each machine (packages/hosts/{hostname}.yaml)
-    Modules: Optional package sets (packages/modules/*.yaml)
-    Additional packages: Ad-hoc packages in config.yaml
-    Exclusions: Host-specific package exclusions
-
-Priority order:
-
-    1. Load base packages
-
-    2. Load host-specific packages (and exclusions)
-
-    3. Load enabled module packages
-
-    4. Load additional packages from config.yaml
-
-    5. Apply exclusions
-
-
-Uninstalling is simple. The `install.sh` script copied the files to `/usr/local/lib/wcli` and created a symbolic link in `/usr/local/bin/`.
-
-You just need to remove those two things.
-
-### 1\. Remove the Program Files
-
-Run these two commands to remove the `wcli` executable and its `providers` package:
-
-    bash
-    # 1. Remove the symbolic link from your PATH
-    sudo rm /usr/local/bin/wcli
-
-    # 2. Remove the actual program directory
-    sudo rm -rf /usr/local/lib/wcli
-    ```
-
-The program is now uninstalled.
-
-### 2\. (Optional) Remove Your Config Files
-
-The program also created a configuration directory in your home folder when you ran `wcli init`. This is kept separate so you don't lose your configs when you update.
-
-If you want to remove your personal configuration as well, run this command (**this will delete all your YAML files**):
-
-    bash
-    rm -rf ~/.config/wcli-config
-    ```
-License
-
-MIT License - feel free to use and modify as needed.
+  - **`wcli: command not found`**: Your shell hasn't registered the new command. Run `hash -r` or restart your terminal.
+  - **`Syntax error: "(" unexpected`**: You ran `sh wcli` instead of `bash install.sh`. Re-run the installer correctly.
+  - **`Error: A provider module could not be imported`**: You ran `install.sh` from the wrong folder. It *must* be in the same directory as the `wcli` script and the `providers/` folder. Re-run the installation from the correct directory.
+  - **`Error: PyYAML dependency not found`**: You need to install the Python YAML library.
+      - `sudo apt install python3-yaml` (Debian/Ubuntu)
+      - `sudo dnf install python3-pyyaml` (Fedora)
+  - **PPA Fails (GPG Error / `dirmngr` not found)**: Your system is missing the PPA key manager.
+      - Fix: `sudo apt install dirmngr` or add `dirmngr` to your `base.yaml` and run `wcli sync`.
+  - **PPA Fails (No Release file)**: The PPA (e.g., Lutris) does not support your (probably new) version of Ubuntu. `wcli` correctly reports this error and skips the PPA. You must wait for the PPA to be updated or use a `flatpak:` entry instead.
