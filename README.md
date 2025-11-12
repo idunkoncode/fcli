@@ -1,9 +1,3 @@
-Here is the updated `README.md` file for your `wcli` project.
-
-It has been fully converted from the old `dcli` to match your new multi-distro Python tool, including the new helper-package syntax and the advanced version-pinning commands.
-
------
-
 # wcli
 
 A declarative, multi-distro package management CLI for Linux, inspired by NixOS.
