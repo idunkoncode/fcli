@@ -7,6 +7,7 @@ import yaml
 import subprocess
 import argparse
 import shutil
+import re
 from pathlib import Path
 
 # --- Configuration Paths ---
@@ -15,7 +16,8 @@ SYS_CONFIG_DIR = Path(os.environ.get("SYS_CONFIG_DIR", Path.home() / ".config" /
 CONFIG_FILE = SYS_CONFIG_DIR / "config.yaml"
 PACKAGES_DIR = SYS_CONFIG_DIR / "packages"
 STATE_DIR = SYS_CONFIG_DIR / "state"
-STATE_FILE = SYS_CONFIG_DIR / "installed.yaml"
+STATE_FILE = STATE_DIR / "installed.yaml"
+LOCK_FILE = STATE_DIR / "locked-versions.yaml" # <-- NEW
 
 # --- Colors ---
 #
@@ -102,22 +104,65 @@ def write_config(config: dict):
         print(f"{RED}Error writing {CONFIG_FILE}: {e}{NC}")
         sys.exit(1)
 
+# <-- NEW: Version comparison helper -->
+def parse_version_constraint(version_str: str) -> (str, str):
+    """Parses a version string (e.g., ">=1.0") into (operator, version)."""
+    if not version_str:
+        return "latest", ""
+    if version_str.startswith(">="):
+        return "minimum", version_str[2:]
+    if version_str.startswith("<="): # Not in dcli, but good to have
+        return "maximum", version_str[2:]
+    if version_str.startswith(">"):
+        return "minimum", version_str[1:] # Simplification
+    if version_str.startswith("<"):
+        return "maximum", version_str[1:]
+    if version_str.startswith("="):
+        return "exact", version_str[1:]
+    return "exact", version_str
+
+# <-- NEW: Main package parsing logic, now returns a dict of objects -->
 def get_declared_packages(config: dict) -> dict:
     """
     Parses all YAMLs to get a dictionary of all declared package lists.
+    Returns a dict: {"packages": {pkg_name: Pkg}, "arch_aur": {pkg_name: Pkg}, ...}
     """
+    
+    # Internal class to hold package data
+    class Pkg:
+        def __init__(self, name, constraint_type="latest", version=""):
+            self.name = name
+            self.constraint_type = constraint_type
+            self.version = version
+        def __repr__(self):
+            return f"Pkg({self.name}, {self.constraint_type}, {self.version})"
+
     package_lists = {
-        "packages": set(),
-        "arch_aur": set(),
+        "packages": {}, # Now a dict of Pkg objects
+        "arch_aur": {},
         "fedora_copr": {},
         "debian_ppa": {},
         "opensuse_obs": {},
         "gentoo_overlay": {},
-        "void_src": set(),
-        "flatpaks": set(), # <-- NEW
+        "void_src": {},
+        "flatpaks": set(), # Flatpak doesn't support versions, keep as set
     }
     excluded_packages = set()
     hostname = config.get('host', '')
+
+    def process_pkg_list(pkg_list: list) -> dict:
+        """Helper to process a list of packages from YAML."""
+        pkg_dict = {}
+        if not pkg_list:
+            return pkg_dict
+        for item in pkg_list:
+            if isinstance(item, str):
+                pkg_dict[item] = Pkg(item)
+            elif isinstance(item, dict) and item.get("name"):
+                name = item["name"]
+                ctype, ver = parse_version_constraint(item.get("version"))
+                pkg_dict[name] = Pkg(name, ctype, ver)
+        return pkg_dict
 
     def load_pkgs_from_file(file_path):
         if file_path.exists():
@@ -127,11 +172,17 @@ def get_declared_packages(config: dict) -> dict:
                     if not data:
                         return
                     
-                    # Handle set-like lists
-                    # <-- NEW: Added "flatpaks" -->
-                    for key in ["packages", "arch_aur", "void_src", "flatpaks"]:
-                        if key in data and data[key]:
-                            package_lists[key].update(data[key])
+                    # Handle "packages" (now with version support)
+                    if "packages" in data and data["packages"]:
+                        package_lists["packages"].update(process_pkg_list(data["packages"]))
+                    
+                    # Handle "arch_aur" (now with version support)
+                    if "arch_aur" in data and data["arch_aur"]:
+                        package_lists["arch_aur"].update(process_pkg_list(data["arch_aur"]))
+
+                    # Handle "flatpaks" (still a simple set)
+                    if "flatpaks" in data and data["flatpaks"]:
+                        package_lists["flatpaks"].update(data["flatpaks"])
                     
                     # Handle map-like lists
                     for key in ["fedora_copr", "debian_ppa", "opensuse_obs", "gentoo_overlay"]:
@@ -139,7 +190,7 @@ def get_declared_packages(config: dict) -> dict:
                             for repo, pkgs in data[key].items():
                                 if repo not in package_lists[key]:
                                     package_lists[key][repo] = set()
-                                package_lists[key][repo].update(pkgs)
+                                package_lists[key][repo].update(pkgs) # Note: These helpers don't support versions yet
 
                     if "exclude" in data and data["exclude"]:
                         excluded_packages.update(data["exclude"])
@@ -149,23 +200,20 @@ def get_declared_packages(config: dict) -> dict:
 
     # 1. Load base packages
     load_pkgs_from_file(PACKAGES_DIR / "base.yaml")
-
     # 2. Load host-specific packages
-    host_file = PACKAGES_DIR / "hosts" / f"{hostname}.yaml"
-    load_pkgs_from_file(host_file)
-
+    load_pkgs_from_file(PACKAGES_DIR / "hosts" / f"{hostname}.yaml")
     # 3. Load enabled module packages
     if config.get("enabled_modules"):
         for module in config["enabled_modules"]:
-            module_file = PACKAGES_DIR / "modules" / f"{module}.yaml"
-            load_pkgs_from_file(module_file)
-
+            load_pkgs_from_file(PACKAGES_DIR / "modules" / f"{module}.yaml")
     # 4. Load additional packages from config
     if config.get("additional_packages"):
-        package_lists["packages"].update(config["additional_packages"])
+        package_lists["packages"].update(process_pkg_list(config["additional_packages"]))
 
     # 5. Apply exclusions
-    package_lists["packages"] -= excluded_packages
+    for pkg_name in excluded_packages:
+        if pkg_name in package_lists["packages"]:
+            del package_lists["packages"][pkg_name]
     
     return package_lists
 
@@ -186,9 +234,7 @@ def run_interactive_cmd(cmd: list, cwd: Path = None, check: bool = True) -> bool
 
 def create_auto_snapshot():
     """Creates a pre-sync snapshot using snapper or timeshift."""
-    
     comment = "wcli-sync auto-snapshot"
-    
     if shutil.which("snapper"):
         print(f"{BLUE}Using snapper to create snapshot...{NC}")
         try:
@@ -196,7 +242,6 @@ def create_auto_snapshot():
             print(f"{GREEN}Snapper snapshot created successfully{NC}")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print(f"{YELLOW}Warning: Failed to create snapper snapshot. Continuing anyway...{NC}")
-            
     elif shutil.which("timeshift"):
         print(f"{BLUE}Using timeshift to create snapshot...{NC}")
         try:
@@ -204,69 +249,108 @@ def create_auto_snapshot():
             print(f"{GREEN}Timeshift snapshot created successfully{NC}")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print(f"{YELLOW}Warning: Failed to create timeshift snapshot. Continuing anyway...{NC}")
-            
     else:
         print(f"{YELLOW}Warning: No snapshot tool (snapper, timeshift) found. Skipping snapshot.{NC}")
 
 # --- Command Functions ---
 
+# <-- NEW: Completely rewritten sync command -->
 def cmd_sync(provider, args):
     """
-    Declarative sync command.
+    Declarative sync command with version pinning.
     """
     print(f"{BLUE}Loading package configuration...{NC}")
     config = load_config()
-    
     all_package_lists = get_declared_packages(config)
-    declared_packages = all_package_lists["packages"]
     
-    installed_packages = provider.get_installed_packages()
+    # Get all official packages and AUR packages
+    declared_pkgs = all_package_lists["packages"]
+    declared_aur = all_package_lists["arch_aur"]
+    
+    print(f"{BLUE}Checking installed package versions...{NC}")
+    installed_pkgs = provider.get_installed_packages_with_versions()
 
-    to_install = list(declared_packages - installed_packages)
+    to_install = []
+    to_upgrade = []
+    to_downgrade = []
     to_remove = []
 
+    # --- 1. Calculate Official Package changes ---
+    for name, pkg in declared_pkgs.items():
+        if name not in installed_pkgs:
+            to_install.append(pkg) # Add Pkg object
+        else:
+            # Package is installed, check version
+            installed_ver = installed_pkgs[name]
+            if pkg.constraint_type == "exact" and pkg.version != installed_ver:
+                if provider.compare_versions(installed_ver, pkg.version) == 1:
+                    to_downgrade.append(pkg)
+                else:
+                    to_upgrade.append(pkg)
+            elif pkg.constraint_type == "minimum" and provider.compare_versions(installed_ver, pkg.version) == 2:
+                to_upgrade.append(pkg)
+            elif pkg.constraint_type == "maximum" and provider.compare_versions(installed_ver, pkg.version) == 1:
+                to_downgrade.append(pkg)
+    
+    # --- 2. Calculate AUR changes (simpler, no downgrades) ---
+    to_install_aur = []
+    for name, pkg in declared_aur.items():
+         if name not in installed_pkgs:
+            to_install_aur.append(pkg)
+        # Note: We won't try to auto-downgrade or version-pin AUR packages for now.
+        # We just install them if missing.
+
+    # --- 3. Calculate Pruning ---
     if args.prune:
         if STATE_FILE.exists():
             try:
                 with open(STATE_FILE, 'r') as f:
-                    managed_packages = set(yaml.safe_load(f).get("packages", []))
+                    managed_pkgs_state = yaml.safe_load(f).get("packages", [])
                 
-                to_remove = list((managed_packages - declared_packages) & installed_packages)
+                # Get just the names
+                managed_names = set(p.get("name") for p in managed_pkgs_state if isinstance(p, dict))
+                managed_names.update(p for p in managed_pkgs_state if isinstance(p, str))
+
+                declared_names = set(declared_pkgs.keys())
+                installed_names = set(installed_pkgs.keys())
+
+                # Find packages that *we* managed but are no longer declared
+                prunable = (managed_names - declared_names) & installed_names
+                to_remove = list(prunable)
             except Exception as e:
                  print(f"{YELLOW}Warning: Could not read state file {STATE_FILE}. Cannot prune. {e}{NC}")
         else:
             print(f"{YELLOW}Warning: State file not found. Cannot prune.{NC}")
     
-    # --- Helper Package Logic ---
+    # --- 4. Get other helper packages ---
     helpers_to_run = {
-        # <-- NEW: Added "flatpak" -->
         "flatpak": (provider.install_flatpak, list(all_package_lists["flatpaks"])),
-        "aur": (provider.install_aur, list(all_package_lists["arch_aur"])),
         "copr": (provider.install_copr, all_package_lists["fedora_copr"]),
         "ppa": (provider.install_ppa, all_package_lists["debian_ppa"]),
         "obs": (provider.install_obs, all_package_lists["opensuse_obs"]),
         "overlay": (provider.install_overlay, all_package_lists["gentoo_overlay"]),
         "src": (provider.install_src, list(all_package_lists["void_src"])),
     }
-    
-    # Display summary
+
+    # --- 5. Display Summary ---
     print(f"\n{BLUE}=== Sync Summary ==={NC}")
-    
     print(f"{BLUE}--- Official Repos ---{NC}")
-    if to_install:
-        print(f"{GREEN}Packages to install ({len(to_install)}):{NC}")
-        for pkg in to_install: print(f"  {pkg}")
-    else:
-        print(f"{GREEN}No official packages to install{NC}")
     
-    if to_remove:
-        print(f"\n{YELLOW}Packages to remove ({len(to_remove)}):{NC}")
-        for pkg in to_remove: print(f"  {pkg}")
-    elif args.prune:
-        print(f"{GREEN}No official packages to remove{NC}")
+    if to_install: print(f"{GREEN}Packages to install ({len(to_install)}):{NC} {[p.name for p in to_install]}")
+    if to_upgrade: print(f"{GREEN}Packages to upgrade ({len(to_upgrade)}):{NC} {[p.name for p in to_upgrade]}")
+    if to_downgrade: print(f"{YELLOW}Packages to downgrade ({len(to_downgrade)}):{NC} {[f'{p.name} (to {p.version})' for p in to_downgrade]}")
+    if to_remove: print(f"{YELLOW}Packages to remove ({len(to_remove)}):{NC} {to_remove}")
+    
+    if not to_install and not to_upgrade and not to_downgrade and not to_remove:
+        print(f"{GREEN}Official packages are in sync{NC}")
 
     # --- Helper Summary ---
     total_helpers = 0
+    if to_install_aur:
+        total_helpers += 1
+        print(f"\n{BLUE}--- Helper: AUR ---{NC}")
+        print(f"{GREEN}Packages to install ({len(to_install_aur)}):{NC} {[p.name for p in to_install_aur]}")
+        
     for name, (func, packages) in helpers_to_run.items():
         if packages:
             total_helpers += 1
@@ -278,7 +362,7 @@ def cmd_sync(provider, args):
             else:
                 for pkg in packages: print(f"  {pkg}")
 
-    if not to_install and not to_remove and total_helpers == 0:
+    if not to_install and not to_upgrade and not to_downgrade and not to_remove and total_helpers == 0:
         print(f"\n{GREEN}System is already in sync!{NC}")
         return
 
@@ -295,40 +379,63 @@ def cmd_sync(provider, args):
     if not args.no_backup:
         create_auto_snapshot()
 
-    # --- Run Installers ---
+    # --- 6. Run Installers ---
     
-    # 1. Official Packages
-    if to_install:
-        print(f"\n{BLUE}Installing official packages...{NC}")
-        if provider.install(to_install):
+    # 1. Downgrades (must happen first)
+    if to_downgrade:
+        print(f"\n{BLUE}Processing {len(to_downgrade)} downgrades...{NC}")
+        failed_downgrades = []
+        for pkg in to_downgrade:
+            print(f"  Attempting to downgrade {pkg.name} to {pkg.version}...")
+            if not provider.downgrade(pkg.name, pkg.version):
+                print(f"{RED}  Error: Failed to downgrade {pkg.name}{NC}")
+                failed_downgrades.append(pkg.name)
+        if failed_downgrades:
+            print(f"{RED}Failed to downgrade: {', '.join(failed_downgrades)}{NC}")
+
+    # 2. Official Packages (Install + Upgrade)
+    install_upgrade_list = [p.name for p in to_install] + [p.name for p in to_upgrade]
+    if install_upgrade_list:
+        print(f"\n{BLUE}Installing/upgrading {len(install_upgrade_list)} official packages...{NC}")
+        if provider.install(install_upgrade_list):
             print(f"{GREEN}Packages installed successfully{NC}")
         else:
             print(f"{RED}Error: Failed to install official packages{NC}")
             
+    # 3. Removals
     if to_remove:
-        print(f"\n{BLUE}Removing packages...{NC}")
+        print(f"\n{BLUE}Removing {len(to_remove)} packages...{NC}")
         if provider.remove(to_remove):
             print(f"{GREEN}Packages removed successfully{NC}")
         else:
             print(f"{RED}Error: Failed to remove packages{NC}")
 
-    # 2. Helper Packages
+    # 4. AUR Packages
+    if to_install_aur:
+        print(f"\n{BLUE}Installing {len(to_install_aur)} AUR packages...{NC}")
+        if provider.install_aur([p.name for p in to_install_aur]):
+            print(f"{GREEN}AUR packages installed successfully{NC}")
+        else:
+            print(f"{RED}Error: Failed to install AUR packages{NC}")
+
+    # 5. Other Helpers
     for name, (func, packages) in helpers_to_run.items():
         if packages:
             print(f"\n{BLUE}Installing {name.upper()} packages...{NC}")
-            if func(packages): # Call the provider's function
+            if func(packages):
                 print(f"{GREEN}{name.upper()} packages installed successfully{NC}")
             else:
                 print(f"{RED}Error: Failed to install {name.upper()} packages{NC}")
-
-    # TODO: Post-install hooks
     
+    # --- 7. Update State File ---
     print(f"\n{BLUE}Updating state file...{NC}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        # We only track official packages in the state file for pruning
+        # Save all *declared* packages (official + AUR) to state
+        all_declared_for_state = [p.name for p in declared_pkgs.values()] + [p.name for p in declared_aur.values()]
         with open(STATE_FILE, 'w') as f:
-            yaml.dump({"packages": sorted(list(declared_packages))}, f)
+            # We save simple names for pruning, as versions are in config.yaml
+            yaml.dump({"packages": sorted(list(all_declared_for_state))}, f)
     except Exception as e:
         print(f"{RED}Error writing state file {STATE_FILE}: {e}{NC}")
         
@@ -357,17 +464,11 @@ def cmd_module_list(provider, args):
 
             # Get counts for all package types
             pkg_counts = []
-            if data.get("packages"):
-                pkg_counts.append(f"Packages: {len(data['packages'])}")
-            # <-- NEW: Added "flatpaks" -->
-            if data.get("flatpaks"):
-                pkg_counts.append(f"Flatpaks: {len(data['flatpaks'])}")
-            if data.get("arch_aur"):
-                pkg_counts.append(f"AUR: {len(data['arch_aur'])}")
-            if data.get("fedora_copr"):
-                pkg_counts.append(f"COPR: {len(data['fedora_copr'])}")
-            if data.get("debian_ppa"):
-                pkg_counts.append(f"PPA: {len(data['debian_ppa'])}")
+            if data.get("packages"): pkg_counts.append(f"Packages: {len(data['packages'])}")
+            if data.get("flatpaks"): pkg_counts.append(f"Flatpaks: {len(data['flatpaks'])}")
+            if data.get("arch_aur"): pkg_counts.append(f"AUR: {len(data['arch_aur'])}")
+            if data.get("fedora_copr"): pkg_counts.append(f"COPR: {len(data['fedora_copr'])}")
+            if data.get("debian_ppa"): pkg_counts.append(f"PPA: {len(data['debian_ppa'])}")
             
             if module_name in enabled_modules:
                 status = f"{GREEN}enabled{NC}"
@@ -468,36 +569,98 @@ def cmd_status(provider, args):
     # Package summary
     all_package_lists = get_declared_packages(config)
     declared_official = all_package_lists["packages"]
-    installed = provider.get_installed_packages()
-    to_install = declared_official - installed
+    installed = provider.get_installed_packages_with_versions() # <-- NEW
+    
+    to_install_count = 0
+    to_action_count = 0
+
+    for name, pkg in declared_official.items():
+        if name not in installed:
+            to_install_count += 1
+            to_action_count += 1
+        else:
+            installed_ver = installed[name]
+            if pkg.constraint_type == "exact" and pkg.version != installed_ver:
+                to_action_count += 1
+            elif pkg.constraint_type == "minimum" and provider.compare_versions(installed_ver, pkg.version) == 2:
+                to_action_count += 1
+            elif pkg.constraint_type == "maximum" and provider.compare_versions(installed_ver, pkg.version) == 1:
+                to_action_count += 1
 
     print(f"\n{BLUE}Packages:{NC}")
     print(f"  Declared: {len(declared_official)} (Official)")
-    print(f"  To install: {len(to_install)} (Official)")
+    print(f"  To install: {to_install_count} (Official)")
+    print(f"  Requiring update/downgrade: {to_action_count - to_install_count}")
     
     # Show counts for all helpers that have packages
     for name, pkgs in all_package_lists.items():
         if name != "packages" and pkgs:
-             # <-- NEW: Added "flatpaks" -->
              if name == "flatpaks":
                  print(f"  Declared: {len(pkgs)} (FLATPAK)")
              elif isinstance(pkgs, dict):
                  print(f"  Declared: {len(pkgs)} ({name.upper()} Repos)")
              else:
-                 print(f"  Declared: {len(pkgs)} ({name.upper()})")
+                 print(f"  Declared: {len(pkgs)} ({name.upper()} Pkgs)")
     
-    if to_install or any(pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
-        if not to_install and all(not pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
-             print(f"\n{GREEN}System is in sync!{NC}")
-        else:
-             print(f"\n{YELLOW}System is out of sync. Run 'wcli sync' to install.{NC}")
+    if to_action_count > 0 or any(pkgs for name, pkgs in all_package_lists.items() if name != "packages"):
+        print(f"\n{YELLOW}System is out of sync. Run 'wcli sync' to install.{NC}")
     else:
         print(f"\n{GREEN}System is in sync!{NC}")
+
+# <-- NEW: Bootstrap function -->
+def cmd_bootstrap(provider, args):
+    """Clones BlackDon's config as a starting point."""
+    print(f"{BLUE}Bootstrapping from BlackDon's arch-config...{NC}")
+    
+    if SYS_CONFIG_DIR.exists():
+        print(f"{RED}Error: {SYS_CONFIG_DIR} already exists.{NC}")
+        print("Please remove it or run 'wcli init' without --bootstrap.")
+        return False
+        
+    try:
+        # 1. Clone repo
+        print(f"{BLUE}→ Cloning repository...{NC}")
+        run_cmd(["git", "clone", "https://gitlab.com/theblackdon/arch-config", str(SYS_CONFIG_DIR)])
+        
+        # 2. Remove .git directory
+        shutil.rmtree(SYS_CONFIG_DIR / ".git", ignore_errors=True)
+        
+        # 3. Create a new config.yaml
+        print(f"{BLUE}→ Creating new config.yaml...{NC}")
+        hostname = os.uname().nodename
+        config_data = {
+            "host": hostname,
+            "enabled_modules": [],
+            "additional_packages": [],
+            "auto_prune": False
+        }
+        write_config(config_data)
+        
+        # 4. Create a host file
+        (PACKAGES_DIR / "hosts").mkdir(parents=True, exist_ok=True)
+        host_data = { "description": f"Packages for {hostname}", "packages": [], "exclude": [] }
+        with open(PACKAGES_DIR / "hosts" / f"{hostname}.yaml", 'w') as f:
+            yaml.dump(host_data, f, sort_keys=False)
+            
+        print(f"\n{GREEN}✓ Bootstrap complete!{NC}")
+        print(f"Your new config is in {SYS_CONFIG_DIR}")
+        print("This is now YOUR config, disconnected from the original repo.")
+        print("Run 'wcli repo init' to create your own git repo for it.")
+        
+    except Exception as e:
+        print(f"{RED}Error during bootstrap: {e}{NC}")
+        shutil.rmtree(SYS_CONFIG_DIR, ignore_errors=True) # Clean up partial clone
+
 
 def cmd_init(provider, args):
     """
     Initializes the wcli-config directory structure.
     """
+    # <-- NEW: Handle bootstrap flag -->
+    if args.bootstrap:
+        cmd_bootstrap(provider, args)
+        return
+
     print(f"{BLUE}Initializing wcli-config directory structure...{NC}")
     
     if SYS_CONFIG_DIR.exists() and not args.force:
@@ -525,12 +688,7 @@ def cmd_init(provider, args):
         hostname = os.uname().nodename
         
         # Create config.yaml
-        config_data = {
-            "host": hostname,
-            "enabled_modules": [],
-            "additional_packages": [],
-            "auto_prune": False
-        }
+        config_data = { "host": hostname, "enabled_modules": [], "additional_packages": [], "auto_prune": False }
         write_config(config_data)
         print(f"{GREEN}✓{NC} Created config.yaml with hostname: {hostname}")
 
@@ -541,26 +699,22 @@ def cmd_init(provider, args):
         print(f"{GREEN}✓{NC} Created packages/base.yaml for {provider.__class__.__module__}")
 
         # Create host-specific package file
-        host_data = {
-            "description": f"Packages specific to {hostname}",
-            "packages": [],
-            "exclude": []
-        }
+        host_data = { "description": f"Packages specific to {hostname}", "packages": [], "exclude": [] }
         with open(PACKAGES_DIR / "hosts" / f"{hostname}.yaml", 'w') as f:
             yaml.dump(host_data, f, sort_keys=False)
         print(f"{GREEN}✓{NC} Created packages/hosts/{hostname}.yaml")
         
         # Create .gitignore
-        (STATE_DIR / ".gitignore").write_text("# Auto-generated state files\ninstalled.yaml\n")
+        (STATE_DIR / ".gitignore").write_text("# Auto-generated state files\ninstalled.yaml\nlocked-versions.yaml\n")
         print(f"{GREEN}✓{NC} Created state/.gitignore")
         
-        # <-- NEW: Updated example module -->
+        # Create example module
         (PACKAGES_DIR / "modules" / "example.yaml").write_text(
             "# Example module template\n\n"
             "description: Example module - customize or delete this\n\n"
-            "packages:\n  # - package1\n\n"
+            "packages:\n  # - package1\n  # - { name: package2, version: \"1.0\" }\n\n"
             "flatpaks:\n  # - net.lutris.Lutris\n\n"
-            "arch_aur:\n  # - aur_package_1\n\n"
+            "arch_aur:\n  # - { name: aur_package_1, version: \"2.0\" }\n\n"
             "fedora_copr:\n  # \"user/repo\":\n  #   - copr_package_1\n\n"
             "debian_ppa:\n  # \"ppa:user/repo\":\n  #   - ppa_package_1\n\n"
             "conflicts: []\n\n"
@@ -720,6 +874,149 @@ def cmd_backup(provider, args):
     except Exception as e:
         print(f"{RED}An unexpected error occurred: {e}{NC}")
 
+# --- NEW: Version Pinning Commands ---
+
+def cmd_lock(provider, args):
+    """Generates a lockfile with all currently installed packages."""
+    print(f"{BLUE}Generating lockfile with current package versions...{NC}")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        installed_pkgs = provider.get_installed_packages_with_versions()
+        lock_data = {"packages": []}
+        
+        for name, version in installed_pkgs.items():
+            lock_data["packages"].append({"name": name, "version": version})
+            
+        with open(LOCK_FILE, 'w') as f:
+            yaml.dump(lock_data, f, sort_keys=False)
+            
+        print(f"{GREEN}✓ Lockfile generated: {LOCK_FILE}{NC}")
+        print(f"  Tracked {len(installed_pkgs)} packages.")
+        
+    except Exception as e:
+        print(f"{RED}Error generating lockfile: {e}{NC}")
+
+def cmd_pin(provider, args):
+    """Pins a package to a specific version in config.yaml."""
+    config = load_config()
+    pkg_name = args.package
+    pkg_version = args.version
+
+    if not pkg_version:
+        print(f"{BLUE}No version specified, detecting installed version for '{pkg_name}'...{NC}")
+        pkg_version = provider.get_package_version(pkg_name)
+        if not pkg_version:
+            print(f"{RED}Error: Package '{pkg_name}' is not installed.{NC}")
+            print(f"You must specify a version: wcli pin {pkg_name} <version>")
+            return
+
+    print(f"{BLUE}Pinning '{pkg_name}' to version: {pkg_version}{NC}")
+    
+    if "additional_packages" not in config or not config["additional_packages"]:
+        config["additional_packages"] = []
+        
+    # Check if package is already in the list
+    found = False
+    for i, item in enumerate(config["additional_packages"]):
+        if isinstance(item, str) and item == pkg_name:
+            config["additional_packages"][i] = {"name": pkg_name, "version": pkg_version}
+            found = True
+            break
+        elif isinstance(item, dict) and item.get("name") == pkg_name:
+            item["version"] = pkg_version
+            item["constraint_type"] = "exact" # Ensure it's an exact pin
+            found = True
+            break
+    
+    if not found:
+        config["additional_packages"].append({"name": pkg_name, "version": pkg_version})
+
+    write_config(config)
+    print(f"{GREEN}✓ '{pkg_name}' is now pinned to {pkg_version} in {CONFIG_FILE}{NC}")
+    print("Run 'wcli sync' to apply this change.")
+
+def cmd_unpin(provider, args):
+    """Removes a package's version pin from config.yaml."""
+    config = load_config()
+    pkg_name = args.package
+    
+    if "additional_packages" not in config or not config["additional_packages"]:
+        print(f"{YELLOW}No packages found in 'additional_packages'.{NC}")
+        return
+
+    new_pkg_list = []
+    found = False
+    for item in config["additional_packages"]:
+        if isinstance(item, dict) and item.get("name") == pkg_name:
+            # Found it. Convert it back to a simple string (unpin)
+            new_pkg_list.append(pkg_name)
+            found = True
+        else:
+            new_pkg_list.append(item)
+            
+    if not found:
+        print(f"{YELLOW}No version pin found for '{pkg_name}' in 'additional_packages'.{NC}")
+        return
+        
+    config["additional_packages"] = new_pkg_list
+    write_config(config)
+    print(f"{GREEN}✓ Removed version pin for '{pkg_name}'.{NC}")
+    print("Run 'wcli sync' to update to the latest version.")
+
+def cmd_versions(provider, args):
+    """Shows installed, available, and cached versions of a package."""
+    pkg_name = args.package
+    print(f"{BLUE}Version information for '{pkg_name}':{NC}")
+    
+    installed_ver = provider.get_package_version(pkg_name)
+    if installed_ver:
+        print(f"  {GREEN}Installed:{NC} {installed_ver}")
+    else:
+        print(f"  {YELLOW}Not installed{NC}")
+        
+    # This is a provider-specific feature
+    provider.show_package_versions(pkg_name)
+
+def cmd_outdated(provider, args):
+    """Compares installed packages against version constraints."""
+    print(f"{BLUE}Checking for packages with version mismatches...{NC}")
+    config = load_config()
+    all_package_lists = get_declared_packages(config)
+    declared_pkgs = all_package_lists["packages"]
+    installed_pkgs = provider.get_installed_packages_with_versions()
+    
+    has_issues = False
+    for name, pkg in declared_pkgs.items():
+        if pkg.constraint_type == "latest":
+            continue
+            
+        if name not in installed_pkgs:
+            print(f"{YELLOW}✗{NC} {name}: {RED}not installed{NC} (constraint: {pkg.constraint_type} {pkg.version})")
+            has_issues = True
+            continue
+            
+        installed_ver = installed_pkgs[name]
+        op = pkg.constraint_type
+        ver = pkg.version
+        
+        satisfies = False
+        if op == "exact" and provider.compare_versions(installed_ver, ver) == 0:
+            satisfies = True
+        elif op == "minimum" and provider.compare_versions(installed_ver, ver) in [0, 1]:
+            satisfies = True
+        elif op == "maximum" and provider.compare_versions(installed_ver, ver) in [0, 2]:
+            satisfies = True
+            
+        if not satisfies:
+            print(f"{YELLOW}✗{NC} {name}: {YELLOW}{installed_ver}{NC} (constraint: {op} {ver})")
+            has_issues = True
+            
+    if not has_issues:
+        print(f"{GREEN}✓ All packages satisfy their version constraints.{NC}")
+    else:
+        print("\nRun 'wcli sync' to fix version mismatches.")
+
 # --- Main Execution ---
 
 def main():
@@ -735,11 +1032,13 @@ def main():
     # --- init ---
     parser_init = subparsers.add_parser("init", help="Initialize wcli-config directory structure")
     parser_init.add_argument("--force", action="store_true", help="Force re-initialization")
+    parser_init.add_argument("--bootstrap", action="store_true", help="Initialize by cloning BlackDon's arch-config") # <-- NEW
     parser_init.set_defaults(func=cmd_init)
 
     # --- update ---
-    parser_update = subparsers.add_parser("update", help="Update system packages")
-    parser_update.set_defaults(func=lambda p, a: p.update())
+    # <-- NEW: update now calls cmd_update -->
+    parser_update = subparsers.add_parser("update", help="Update system packages, respecting version pins")
+    parser_update.set_defaults(func=cmd_update)
 
     # --- install ---
     parser_install = subparsers.add_parser("install", help="Install a package")
@@ -757,7 +1056,7 @@ def main():
     parser_search.set_defaults(func=lambda p, a: p.search(a.package))
 
     # --- sync ---
-    parser_sync = subparsers.add_parser("sync", help="Install packages to match configuration")
+    parser_sync = subparsers.add_parser("sync", help="Install/downgrade/upgrade packages to match configuration")
     parser_sync.add_argument("-d", "--dry-run", action="store_true", help="Preview changes without applying")
     parser_sync.add_argument("--prune", action="store_true", help="Remove packages not in configuration")
     parser_sync.add_argument("--force", action="store_true", help="Skip confirmation prompts")
@@ -805,6 +1104,50 @@ def main():
     parser_bk.add_argument("-m", "--message", help="Comment/description for --create")
     parser_bk.add_argument("--snapshot", help="Snapshot ID/name for --restore (Timeshift only)")
     parser_bk.set_defaults(func=cmd_backup)
+
+    # --- NEW: Version Pinning Argparsers ---
+    parser_lock = subparsers.add_parser("lock", help="Generate lockfile with current package versions")
+    parser_lock.set_defaults(func=cmd_lock)
+    
+    parser_pin = subparsers.add_parser("pin", help="Pin package to specific version (or current)")
+    parser_pin.add_argument("package", help="Package name to pin")
+    parser_pin.add_argument("version", nargs="?", help="Version to pin (default: installed version)")
+    parser_pin.set_defaults(func=cmd_pin)
+    
+    parser_unpin = subparsers.add_parser("unpin", help="Remove version constraint from a package")
+    parser_unpin.add_argument("package", help="Package name to unpin")
+    parser_unpin.set_defaults(func=cmd_unpin)
+
+    parser_versions = subparsers.add_parser("versions", help="Show version info for a package")
+    parser_versions.add_argument("package", help="Package name to check")
+    parser_versions.set_defaults(func=cmd_versions)
+    
+    parser_outdated = subparsers.add_parser("outdated", help="Show packages that don't match version constraints")
+    parser_outdated.set_defaults(func=cmd_outdated)
+
+    # --- NEW: `cmd_update` for the update command ---
+    def cmd_update(provider, args):
+        """Wrapper for provider's update, respecting pins."""
+        print(f"{BLUE}Checking for version constraints...{NC}")
+        config = load_config()
+        all_package_lists = get_declared_packages(config)
+        
+        ignore_list = []
+        for name, pkg in all_package_lists["packages"].items():
+            if pkg.constraint_type in ["exact", "maximum"]:
+                ignore_list.append(name)
+        
+        for name, pkg in all_package_lists["arch_aur"].items():
+            if pkg.constraint_type in ["exact", "maximum"]:
+                ignore_list.append(name)
+        
+        if ignore_list:
+            print(f"{YELLOW}Ignoring {len(ignore_list)} packages with (exact/max) version pins:{NC}")
+            print(f"  {', '.join(ignore_list)}")
+        else:
+            print(f"{GREEN}No version pins found. Updating all packages.{NC}")
+        
+        provider.update(ignore_list=ignore_list)
 
     # --- Argument Fallback for 'search' ---
     if len(sys.argv) == 2 and not sys.argv[1].startswith('-') and sys.argv[1] not in subparsers.choices:
